@@ -1,0 +1,29 @@
+.viewer-container {
+  position: relative;
+  width: 1000px;
+}
+
+.view-label {
+  position: absolute;
+  color: white;
+  font-weight: bold;
+  background: rgba(0,0,0,0.5);
+  padding: 3px 6px;
+  font-size: 14px;
+}
+
+/* approximate positions */
+.axial {
+  bottom: 5px;
+  left: 5px;
+}
+
+.sagittal {
+  top: 5px;
+  right: 5px;
+}
+
+.coronal {
+  top: 5px;
+  left: 5px;
+}

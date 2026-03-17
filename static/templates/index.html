@@ -1,0 +1,48 @@
+<!-- templates/index.html -->
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Medical Viewer</title>
+</head>
+
+<body>
+
+<h2>Segmentation Viewer</h2>
+
+<canvas id="viewer" width="900" height="600"></canvas>
+
+<br>
+
+<label>Opacity</label>
+<input id="opacitySlider" type="range" min="0" max="1" step="0.05">
+
+<br><br>
+
+<label>
+<input id="toggleFP" type="checkbox" checked>
+Show False Positives
+</label>
+
+<br>
+
+<label>
+<input id="toggleFN" type="checkbox" checked>
+Show False Negatives
+</label>
+
+<br><br>
+
+<button id="jumpError">
+Jump to Largest Error
+</button>
+
+<br><br>
+
+<input type="text" id="caseSelector" placeholder="Enter image case id">
+<button id="submitButton">Submit</button>
+
+<script type="module" src="static/script.js"></script>
+
+</body>
+</html>
