@@ -2,9 +2,6 @@ import { useEffect, useRef, useState } from "react";
 import { Niivue, NVImage } from "@niivue/niivue";
 import "./Viewer.css";
 
-let fpIndex = null;
-let fnIndex = null;
-
 export default function Viewer() {
 
   const canvasRef = useRef(null);
@@ -13,8 +10,8 @@ export default function Viewer() {
 
   const [caseID, setCaseID] = useState("");
   const [opacity, setOpacityValue] = useState(0.4);
-  const [showFP, setShowFP] = useState(true);
-  const [showFN, setShowFN] = useState(true);
+  const [selectedModel, setSelectedModel] = useState("model1");
+  const [availableModels, setAvailableModels] = useState([]);
 
   useEffect(() => {
     const nv = new Niivue({
@@ -27,9 +24,25 @@ export default function Viewer() {
 
     nvRef.current = nv;
 
+    // Fetch available models
+    fetchAvailableModels();
+
     console.log("Niivue initialized");
 
   }, []);
+
+  async function fetchAvailableModels() {
+    try {
+      const res = await fetch(`/models`);
+      const data = await res.json();
+      setAvailableModels(data || []);
+      if (data && data.length > 0) {
+        setSelectedModel(data[0]);
+      }
+    } catch (err) {
+      console.error("Error fetching models:", err);
+    }
+  }
 
   async function getVolume(url, colormap, opacity){
 
@@ -44,33 +57,42 @@ export default function Viewer() {
 
   async function loadCase() {
 
-    const volumeCache = {}
-    const res = await fetch(`/load/${caseID}`);
+    const res = await fetch(`/load/${caseID}?model_name=${selectedModel}`);
     const data = await res.json();
 
     console.log("Volume URLs:");
     console.log(data.image, data.gt, data.pred);
 
     nvRef.current.removeAllVolumes;
-    await nvRef.current.loadVolumes([
+    const volumes = [
       { url: data.image },
-      { url: data.gt, colormap: "gold", opacity: opacity },
-      { url: data.pred, colormap: "green", opacity: opacity },
-    ]);
+      { url: data.gt, colormap: "blue", opacity: opacity },
+      { url: data.pred, colormap: "gold", opacity: opacity },
+    ];
+
+    // Add imageType for DICOM
+    volumes.forEach(vol => {
+      if (vol.url.endsWith('.dcm')) {
+        vol.imageType = "DCM";
+      }
+    });
+
+    await nvRef.current.loadVolumes(volumes);
 
     console.log("Volumes:", nvRef.current.volumes.length);
   }
 
-  async function errorMaps() {
-    
-    const res = await fetch(`/error/${caseID}`);
+  async function segmentWithModel() {
+
+    const res = await fetch(`/segment/${caseID}?model_name=${selectedModel}`);
     const data = await res.json();
-    const fpImage = await getVolume(data.fp, "red", 0.7)
-    const fnImage = await getVolume(data.fn, "blue", 0.7)
 
+    console.log("Segmentation URL:");
+    console.log(data.output_path);
 
-    nvRef.current.addVolume(fpImage);
-    nvRef.current.addVolume(fnImage);
+    const predImage = await getVolume(data.output_path, "gold", opacity)
+
+    nvRef.current.addVolume(predImage);
 
     console.log("Volumes:", nvRef.current.volumes.length);
   }
@@ -99,33 +121,13 @@ export default function Viewer() {
     nv.moveCrosshairInVox(-cx/2, -cy/2, -cz/2)
   }
 
-  function toggleFP(enabled){
-    if (fpIndex !== null){
-        nv.setOpacity(fpIndex, enabled ? 0.9 : 0)
-    }
-  }
-
-  function toggleFN(enabled){
-    if (fnIndex !== null){
-        nv.setOpacity(fnIndex, enabled ? 0.9 : 0)
-    }
-  }
-
   async function handleSubmit() {
     try {
     await loadCase();
-    await errorMaps();
+    await segmentWithModel();
    }catch (err) {
       console.error("Error loading case:", err);
     }
-  }
-
-  async function jumpToLargestError() {
-
-    const res = await fetch(`/largest_error_slice/${caseID}`);
-    const data = await res.json();
-
-    nvRef.current.setSlice(data.slice);
   }
 
   return (
@@ -157,31 +159,14 @@ export default function Viewer() {
 
       <br /><br /> 
 
-      <label>
-        <input
-          type="checkbox"
-          checked={showFP}
-          onChange={(e) => toggleFP(e.target.checked)}
-        />
-        Show False Positives
-      </label>
-
-        <br />
-
-      <label>
-        <input
-          type="checkbox"
-          checked={showFN}
-          onChange={(e) => toggleFN(e.target.checked)}
-        />
-        Show False Negatives
-      </label>      
-
-      <br /><br />
-
-      <button onClick={jumpToLargestError}>
-        Jump to Largest Error
-      </button>
+      <label>Select Model:</label>
+      <select value={selectedModel} onChange={(e) => setSelectedModel(e.target.value)}>
+        {availableModels.map((model) => (
+          <option key={model} value={model}>
+            {model}
+          </option>
+        ))}
+      </select>
 
       <br /><br />
 
