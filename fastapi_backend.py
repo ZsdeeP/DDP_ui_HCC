@@ -10,7 +10,8 @@ from pathlib import Path
 
 import torch
 from infer_model import DummyDataset
-
+import pandas as pd
+import json
 import pydicom as dicom
 import monai
 from typing import List, Union, Tuple
@@ -24,6 +25,9 @@ from monai.transforms.utility.dictionary import EnsureTyped
 from monai.transforms.post.dictionary import Invertd
 
 from infer_model import load_metadata_indices, load_trained_model, run_inference, save_val_results, collate_with_metadata
+from radiomics_extractor import RadiomicsExtractor
+from tace_planner import TACEPlanner
+from data_utils import read_dicom_series, read_segmentation_dicom
 
 class ModelSelect(BaseModel):
     models: str
@@ -54,9 +58,13 @@ def get_image_path(case_id: str, suffix: str = "", category: int = 0, model_name
         else:
             raise FileNotFoundError(f"No segmentation file found for {case_id} with model {model_name}")
 
-    nii_path = data_path / cat_dict[category] / f"{case_id}{suffix}.nii.gz"
+    nii_path = data_path / cat_dict[category] / f"{case_id}{suffix}.nii"
+    nii_gz_path = data_path / cat_dict[category] / f"{case_id}{suffix}.nii.gz"
+
     dcm_path = data_path / cat_dict[category] / f"{case_id}{suffix}.dcm"
     if nii_path.exists():
+        return f"/data/{cat_dict[category]}/{case_id}{suffix}.nii"
+    elif nii_gz_path.exists():
         return f"/data/{cat_dict[category]}/{case_id}{suffix}.nii.gz"
     elif dcm_path.exists():
         return f"/data/{cat_dict[category]}/{case_id}{suffix}.dcm"
@@ -79,13 +87,26 @@ def segment_images(case_id: str, model_name: str, class_number: int, patch_size:
         dataloader = load_metadata_indices([int(case_id)], master_transforms, ROOT_DIR, class_number)
     else:
         #load nifti image directly and create dataloader with dummy label and metadata
-        image = nib.load(get_image_path(case_id)).get_fdata() # type: ignore
-        label = nib.load(get_image_path(case_id, "_gt")).get_fdata() if (data_path / f"{case_id}_gt.nii.gz").exists() else np.zeros_like(image) # type: ignore
-
-        data = [{"image": image, "label": label, "metadata": {"affine": np.eye(4)}}]
+        #account for dicom images and segmentations as well
+        image_path = get_image_path(case_id, category=0)
+        label_path = get_image_path(case_id, "_gt", category=1)
+        if image_path.endswith(".dcm"):
+            image, metadata = read_dicom_series(str(image_path))
+            label = read_segmentation_dicom(str(label_path)) 
+            data = [{"image": image, 
+                     "label": label, 
+                     "metadata": {**metadata}
+                    }]
+    
+        elif image_path.endswith(".nii.gz") or image_path.endswith(".nii"):
+            image = nib.load(get_image_path(case_id)).get_fdata() # type: ignore
+            label = nib.load(get_image_path(case_id, "_gt", category=1)).get_fdata() if (data_path / f"{case_id}_gt.nii.gz").exists() else np.zeros_like(image) # type: ignore
+            data = [{"image": image, "label": label, "metadata": {"affine": np.eye(4)}}]
+        else:
+            raise ValueError(f"Unsupported file format for case {case_id}")
+        
         dataset = DummyDataset(data, master_transforms)
         dataloader = DataLoader(dataset, batch_size=1, collate_fn=collate_with_metadata)
-
 
     model = load_trained_model(model_name, device, class_number)
     if model:
@@ -99,14 +120,12 @@ def segment_images(case_id: str, model_name: str, class_number: int, patch_size:
             all_metadata = batch["metadata"]
         outputs, dice = labels, 1.0  #dummy outputs for testing
     return outputs, all_metadata, dice
-    #print(f"DICE score on the class {class_number} is {dice}")
-    #save_outputs_as_nifti(outputs, all_metadata, data_path, class_number)
 
 @app.get("/segment/{case_id}")
 def segment_case(case_id: str, model_name: str):
     if data_path / "segmentations" / model_name / f"{case_id}_pred.nii.gz" in data_path.glob(f"segmentations/{model_name}/{case_id}_pred.nii.gz"):
         return {"output_path": f"/data/segmentations/{model_name}/{case_id}_pred.nii.gz"}
-    
+
     Path.mkdir(data_path / "segmentations" / model_name, exist_ok=True)
     result_list = []
     affine0 = np.eye(4)
@@ -144,6 +163,99 @@ def get_available_models():
         return models
 
     return ['model1']
+
+
+@app.post("/extract-radiomics/{case_id}")
+def extract_radiomics(case_id: str, tissue_class: int = 2):
+    """Extract radiomics features from a segmented case"""
+    try:
+        # Find scan folder and segmentation file
+        scan_folder = data_path / "base_images" / case_id
+        seg_file = data_path / "segmentations" / "model1" / f"{case_id}_pred.nii.gz"
+
+        if not scan_folder.exists():
+            return JSONResponse(status_code=404, content={"error": f"Scan folder not found: {scan_folder}"})
+
+        if not seg_file.exists():
+            return JSONResponse(status_code=404, content={"error": f"Segmentation file not found: {seg_file}"})
+
+        # Extract features
+        extractor = RadiomicsExtractor(class_number=tissue_class)
+        features = extractor.extract_features_from_patient(str(scan_folder), str(seg_file), case_id)
+
+        if features is None:
+            return JSONResponse(status_code=400, content={"error": "Failed to extract features"})
+
+        # Save features to CSV
+        features_df = pd.DataFrame([features])
+        output_dir = data_path / "radiomics"
+        output_dir.mkdir(exist_ok=True)
+        csv_path = output_dir / f"{case_id}_radiomics_class_{tissue_class}.csv"
+        features_df.to_csv(csv_path, index=False)
+
+        return {
+            "case_id": case_id,
+            "tissue_class": tissue_class,
+            "features_count": len(features) - 2,  # Exclude patient_id and class_number
+            "csv_path": f"/data/radiomics/{case_id}_radiomics_class_{tissue_class}.csv",
+            "features": features
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/tace-plan/{case_id}")
+def plan_tace_procedure(case_id: str):
+    """Run TACE planning analysis on a case"""
+    try:
+        # Find scan folder and segmentation file
+        scan_folder = data_path / "base_images" / case_id
+        seg_file = data_path / "segmentations" / "model1" / f"{case_id}_pred.nii.gz"
+
+        if not scan_folder.exists():
+            return JSONResponse(status_code=404, content={"error": f"Scan folder not found: {scan_folder}"})
+
+        if not seg_file.exists():
+            return JSONResponse(status_code=404, content={"error": f"Segmentation file not found: {seg_file}"})
+
+        # Run TACE planning
+        planner = TACEPlanner()
+        report = planner.analyze_patient(str(scan_folder), str(seg_file), case_id)
+
+        # Save report
+        output_dir = data_path / "tace_reports" / case_id
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        report_file = output_dir / f"{case_id}_tace_report.json"
+        with open(report_file, 'w') as f:
+            json.dump(report, f, indent=2, default=str)
+
+        # Generate visualizations
+        viz_dir = output_dir / "visualizations"
+        planner.visualize_patient(report, str(viz_dir))
+
+        # Find visualization files
+        visualizations = {}
+        if viz_dir.exists():
+            for file_path in viz_dir.glob("*"):
+                if file_path.is_file():
+                    rel_path = file_path.relative_to(data_path)
+                    visualizations[file_path.stem] = f"/data/{rel_path}"
+
+        return {
+            "case_id": case_id,
+            "report_path": f"/data/tace_reports/{case_id}/{case_id}_tace_report.json",
+            "visualizations": visualizations,
+            "summary": {
+                "tumor_volume_ml": report.get('tumor_analysis', {}).get('tumor_volume_ml', 0),
+                "feeding_vessels": report.get('vessel_analysis', {}).get('num_feeding_candidates', 0),
+                "tace_feasibility": report.get('tumor_analysis', {}).get('tumor_location', 'unknown')
+            }
+        }
+
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
 
 
 

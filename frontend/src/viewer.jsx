@@ -12,6 +12,9 @@ export default function Viewer() {
   const [opacity, setOpacityValue] = useState(0.4);
   const [selectedModel, setSelectedModel] = useState("model1");
   const [availableModels, setAvailableModels] = useState([]);
+  const [radiomicsResult, setRadiomicsResult] = useState(null);
+  const [taceResult, setTaceResult] = useState(null);
+  const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
     const nv = new Niivue({
@@ -95,6 +98,40 @@ export default function Viewer() {
     nvRef.current.addVolume(predImage);
 
     console.log("Volumes:", nvRef.current.volumes.length);
+  }
+
+  async function extractRadiomics() {
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/extract-radiomics/${caseID}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ tissue_class: 2 }) // Default to tumor
+      });
+      const data = await res.json();
+      setRadiomicsResult(data);
+    } catch (err) {
+      console.error("Error extracting radiomics:", err);
+      setRadiomicsResult({ error: err.message });
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function planTACE() {
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/tace-plan/${caseID}`, {
+        method: 'POST'
+      });
+      const data = await res.json();
+      setTaceResult(data);
+    } catch (err) {
+      console.error("Error planning TACE:", err);
+      setTaceResult({ error: err.message });
+    } finally {
+      setIsLoading(false);
+    }
   }
 
   function setOpacity(value) {
