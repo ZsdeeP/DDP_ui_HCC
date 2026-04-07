@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 from scipy import ndimage
 from skimage import measure
-from skimage.morphology import skeletonize_3d
+from skimage.morphology import skeletonize
 import matplotlib.pyplot as plt
 import matplotlib.patches as mpatches
 from matplotlib.gridspec import GridSpec
@@ -36,7 +36,7 @@ class VesselAnalyzer:
             warnings.warn("Empty vessel mask provided")
             return np.zeros_like(vessel_binary)
 
-        skeleton = skeletonize_3d(vessel_binary)
+        skeleton = skeletonize(vessel_binary)
         self.vessel_skeleton = skeleton
         return skeleton
 
