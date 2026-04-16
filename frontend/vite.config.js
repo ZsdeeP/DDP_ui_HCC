@@ -10,7 +10,9 @@ export default defineConfig({
       "/segment": "http://localhost:8000",
       "/models": "http://localhost:8000",
       "/extract_radiomics": "http://localhost:8000",
-      "/tace-plan": "http://localhost:8000"
+      "/tace_plan": "http://localhost:8000",
+      "/run_survival_analysis": "http://localhost:8000",
+      "/run_outcome_prediction": "http://localhost:8000"
     }
   }
 });

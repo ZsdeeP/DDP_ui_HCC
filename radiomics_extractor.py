@@ -5,6 +5,8 @@ import SimpleITK as sitk
 from radiomics import featureextractor
 import logging
 from tqdm import tqdm
+import nibabel as nib
+from pathlib import Path
 from data_utils import read_dicom_series, read_segmentation_dicom, apply_window
 
 class RadiomicsExtractor:
@@ -63,13 +65,75 @@ class RadiomicsExtractor:
         # Setup logging
         logging.getLogger('radiomics').setLevel(logging.ERROR)
 
+    def _load_volume(self, volume_path):
+        """
+        Load volume from either DICOM series or NIfTI file
+        
+        Args:
+            volume_path: Path to DICOM folder or NIfTI file
+            
+        Returns:
+            tuple: (volume array, metadata dict)
+        """
+        volume_path = Path(volume_path)
+        
+        # Check if it's a NIfTI file
+        if volume_path.is_file() and (volume_path.suffix in ['.nii', '.gz']):
+            # Load NIfTI file
+            nib_img = nib.load(volume_path)
+            volume = nib_img.get_fdata() #type: ignore
+            metadata = {
+                'affine': nib_img.affine,
+                'spacing': nib_img.header.get_zooms()[:3]  # Get voxel spacing
+            }
+            return volume, metadata
+        # Check if it's a DICOM directory
+        elif volume_path.is_dir():
+            # Load DICOM series
+            volume, metadata = read_dicom_series(str(volume_path))
+            return volume, metadata
+        else:
+            raise ValueError(f"Invalid volume path: {volume_path}. Must be a DICOM directory or NIfTI file.")
+
+    def _load_segmentation(self, seg_path, class_number=None):
+        """
+        Load segmentation from either DICOM or NIfTI file
+        
+        Args:
+            seg_path: Path to DICOM SEG file or NIfTI file
+            class_number: Class number to extract (for DICOM SEG)
+            
+        Returns:
+            np.ndarray: Segmentation mask
+        """
+        seg_path = Path(seg_path)
+        
+        # Check if it's a NIfTI file
+        if seg_path.is_file() and (seg_path.suffix in ['.nii', '.gz']):
+            # Load NIfTI file
+            nib_img = nib.load(seg_path)
+            segmentation = nib_img.get_fdata() #type: ignore
+            
+            # If requesting a specific class, extract it
+            if class_number is not None:
+                segmentation = (segmentation == class_number).astype(np.float32)
+            
+            return segmentation
+        # Check if it's a DICOM SEG file
+        elif seg_path.is_file() and seg_path.suffix.lower() == '.dcm':
+            # Load DICOM segmentation
+            segmentation = read_segmentation_dicom(str(seg_path), class_number=class_number)
+            return segmentation
+        else:
+            raise ValueError(f"Invalid segmentation path: {seg_path}. Must be a DICOM SEG file or NIfTI file.")
+
     def extract_features_from_patient(self, scan_folder, seg_file, patient_id):
         """
         Extract radiomics features for a single patient
 
         Args:
-            scan_folder: Path to DICOM series folder
-            seg_file: Path to segmentation DICOM file
+            scan_folder: Path to DICOM series folder or NIfTI volume file
+            seg_file: Path to segmentation DICOM file or NIfTI file
             patient_id: Patient identifier
 
         Returns:
@@ -77,14 +141,14 @@ class RadiomicsExtractor:
         """
         try:
             # Load CT volume
-            volume, metadata = read_dicom_series(scan_folder)
+            volume, metadata = self._load_volume(scan_folder)
 
             # Apply windowing if requested
             if self.apply_liver_window:
                 volume = apply_window(volume, window_center=self.wc, window_width=self.ww)
 
             # Load segmentation mask
-            segmentation = read_segmentation_dicom(seg_file, class_number=self.class_number)
+            segmentation = self._load_segmentation(seg_file, class_number=self.class_number)
 
             if np.sum(segmentation) == 0:
                 logging.warning(f"Empty mask for {patient_id}, class {self.class_number}")

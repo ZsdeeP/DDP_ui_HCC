@@ -4,21 +4,100 @@ import numpy as np
 import pydicom
 from pydicom_seg import reader #also create nifti loader
 
-def affine2d(ds):
-    F11, F21, F31 = ds.ImageOrientationPatient[3:]
-    F12, F22, F32 = ds.ImageOrientationPatient[:3]
+def generate_coordinate_matrix(coord_system):
+    """
+    Generate a transformation matrix from the given coordinate system
+    to the world coordinate system.
+    :param coord_system: String representing the coordinate system (e.g., 'LSP', 'RAS', etc.)
+    :return: 4x4 transformation matrix
+    """
+    if len(coord_system) != 3:
+        raise ValueError("Coordinate system must have exactly 3 characters (e.g., 'RAS', 'LSP').")
+    
+    # Mapping from coordinate labels to axis directions
+    axis_mapping = {
+        'R': [1, 0, 0],   # Right (positive X)
+        'L': [-1, 0, 0],  # Left (negative X)
+        'A': [0, 1, 0],   # Anterior (positive Y)
+        'P': [0, -1, 0],  # Posterior (negative Y)
+        'S': [0, 0, 1],   # Superior (positive Z)
+        'I': [0, 0, -1]   # Inferior (negative Z)
+    }
 
-    dr, dc = ds.PixelSpacing
-    Sx, Sy, Sz = ds.ImagePositionPatient
+    # Extract the directions for X, Y, Z
+    x_axis = axis_mapping[coord_system[0]]
+    y_axis = axis_mapping[coord_system[1]]
+    z_axis = axis_mapping[coord_system[2]]
 
-    return np.array(
-        [
-            [F11 * dr, F12 * dc, 0, Sx],
-            [F21 * dr, F22 * dc, 0, Sy],
-            [F31 * dr, F32 * dc, 0, Sz],
-            [0, 0, 0, 1]
-        ]
-    )
+    # Ensure the coordinate system is valid 
+    if not np.isclose(np.dot(x_axis, y_axis), 0) or not np.isclose(np.dot(x_axis, z_axis), 0) or not np.isclose(np.dot(y_axis, z_axis), 0):
+        raise ValueError(f"Invalid coordinate system: {coord_system}. Axes must be orthogonal.")
+    
+    # Create the transformation matrix
+    transform_matrix = np.eye(4)
+    transform_matrix[:3, 0] = x_axis  # X axis
+    transform_matrix[:3, 1] = y_axis  # Y axis
+    transform_matrix[:3, 2] = z_axis  # Z axis
+
+    return transform_matrix
+
+def calculate_transform_matrix(source_coord, target_coord):
+    """
+    Calculate the transformation matrix to convert coordinates
+    from source_coord to target_coord.
+    :param source_coord: Source coordinate system (e.g., 'LSP')
+    :param target_coord: Target coordinate system (e.g., 'RAS')
+    :return: 4x4 transformation matrix
+    """
+    # Generate matrices for both systems
+    source_to_world = generate_coordinate_matrix(source_coord)
+    target_to_world = generate_coordinate_matrix(target_coord)
+
+    # Calculate the transform from source to target
+    transform_matrix = np.linalg.inv(target_to_world) @ source_to_world
+    return transform_matrix
+
+
+def compute_affine(slices):
+    dicom_files = [s[0] for s in slices] 
+    ds = pydicom.dcmread(dicom_files[0])
+    
+    image_orientation = np.array(ds.ImageOrientationPatient) 
+    #print(f'image_orientation: {image_orientation}')
+    #print(f'image_position: {ds.ImagePositionPatient}')
+    row_cosine = image_orientation[3:]
+    col_cosine = image_orientation[:3]
+    #col_cosine = image_orientation[:3]
+    #row_cosine = image_orientation[3:]
+    pixel_spacing = np.array(ds.PixelSpacing) 
+    
+    first_position = np.array(ds.ImagePositionPatient)  
+    if len(dicom_files) > 1:
+        ds_next = pydicom.dcmread(dicom_files[1]) 
+        second_position = np.array(ds_next.ImagePositionPatient)
+        #print(f'first_instance_number: {ds.InstanceNumber}')
+        #print(f'second_instance_number: {ds_next.InstanceNumber}')
+        #print(f'first_position: {first_position}')
+        #print(f'second_position: {second_position}')
+        
+        slice_direction = second_position - first_position
+        #print(f'slice_direction before: {slice_direction}')
+        slice_spacing = np.linalg.norm(slice_direction)
+        slice_cosine = slice_direction / slice_spacing
+
+    else:
+        slice_cosine = np.cross(col_cosine,row_cosine)
+        slice_spacing = 1.0
+        ds_next = pydicom.dcmread(dicom_files[0]) 
+
+    
+    affine = np.eye(4)
+    affine[:3, 0] = row_cosine * pixel_spacing[0]
+    affine[:3, 1] = col_cosine * pixel_spacing[1]
+    affine[:3, 2] = slice_cosine * slice_spacing* np.sign(ds_next.InstanceNumber-ds.InstanceNumber)
+    affine[:3, 3] = first_position
+    return affine
+
 
 def apply_window(image, window_center=30, window_width=150):
     """
@@ -88,8 +167,9 @@ def read_dicom_series(directory):
     ref_dicom = slices[0][1]
 
     # Read Affine transformation matrix
-    affine_matrix = affine2d(ref_dicom)
-
+    
+    affine_matrix = compute_affine(slices)
+    
     # Extract patient information
     patient_id = ref_dicom.PatientID if hasattr(ref_dicom, 'PatientID') else "Unknown"
 
@@ -120,6 +200,7 @@ def read_dicom_series(directory):
 
     # Return volume and metadata
     metadata = {
+        'affine':affine_matrix,
         'patient_id': patient_id,
         'slice_thickness': slice_thickness,
         'pixel_spacing': pixel_spacing,

@@ -215,7 +215,7 @@ def collate_with_metadata(batch):
 #mask other classes
 
 class DummyDataset(Dataset):
-    def __init__(self, data, transform=None):
+    def __init__(self, data, transform=None,):
         self.data = data
         self.transform = transform
 
@@ -227,6 +227,84 @@ class DummyDataset(Dataset):
         if self.transform:
             sample = self.transform(sample)
         return sample
+
+
+class DummyHCCDataset(Dataset):
+    def __init__(
+        self, indices, root_dir, transform=None, apply_liver_window=False, class_number=1,
+    ):
+        """
+        Custom dataset for HCC segmentation
+        """
+        self.indices = indices
+        self.root_dir = root_dir
+        self.transform = transform
+        self.apply_liver_window = apply_liver_window
+        self.class_number = class_number
+        self.img_loader = LoadImage(image_only=True, ensure_channel_first=True)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, idx):
+        if torch.is_tensor(idx):
+            idx = idx.tolist()
+        
+        img_idx = self.indices[idx]
+        if img_idx not in self.indices:
+            raise ValueError(f"Index {img_idx} not in provided indices list")
+
+        patient_id = img_idx
+
+        scan_folder = self.root_dir / "data" / "base_images"/str(img_idx)  # os.path.join(self.root_dir, row["SCAN_FOLDER"])
+        seg_file_dir = self.root_dir / "data" / "ground_truths" / f"{img_idx}_gt" # os.path.join(self.root_dir, row["SEGMENTATION_FILE"])
+
+        seg_file_name = [f.name for f in Path(seg_file_dir).glob('*.dcm')][0]
+
+        seg_file = seg_file_dir / seg_file_name
+        # Load the CT volumeTrue
+        volume, metadata = read_dicom_series(scan_folder)
+
+        # Apply liver window if requested
+        if self.apply_liver_window:
+            volume = apply_window(volume, window_center=150, window_width=250) #worked well for blood vessels; originally was 40, 140
+
+        # Load the segmentation mask
+        segmentation = read_segmentation_dicom(seg_file, class_number=self.class_number)
+
+        other_classes = [i for i in range(1, 5) if i != self.class_number]
+        segmentation = np.transpose(segmentation, (1, 2, 0))
+        not_seg = np.zeros_like(segmentation)
+
+        '''for i in other_classes:
+            segi_path = Path(f"intermediate_masks/{class_tissue_dict[i]}/{patient_id}.nii.gz")
+            if segi_path.is_file():
+                segi = np.transpose(self.img_loader(segi_path).squeeze(0), (1, 2, 0))
+                not_seg = not_seg + segi
+        '''
+        #not_seg = seg1 + seg2 + seg4
+
+        # Convert volume from (D,H,W) to (H,W,D)
+        volume = np.transpose(volume, (1, 2, 0))
+
+        #if self.class_number == 3:
+        #volume = volume * (not_seg == 0) #mask out other organs (best case result for blood vessels)
+
+
+        # Convert to tensors
+        sample = {
+            "image": torch.from_numpy(volume).unsqueeze(0),  # Add channel dimension
+            "label": torch.from_numpy(segmentation).unsqueeze(0),  # Add channel dimension
+            "metadata": metadata,
+        }
+
+        if self.transform:
+            sample = self.transform(sample)
+
+        return sample
+
+
+
 
 
 class HCCDataset(Dataset):
@@ -332,7 +410,7 @@ def get_dice_score(prev_masks, gt3D):
         return (sum(dice_list) / len(dice_list))
 
 
-def save_val_results(result, class_, metadata: dict|None):
+def save_val_results(result, metadata: dict|None):
     # Ideally the output is a dicom so the information about the location of each segmentation is preserved
     # without this, the nifti file cannot be used to rule out regions containing blood vessels directly.
     
@@ -385,7 +463,16 @@ def save_val_results(result, class_, metadata: dict|None):
 # save the output volumes as NIfTI files
 
 def load_metadata_indices(indices: List[int], master_transforms: Compose, root_dir: Path, class_number: int) -> DataLoader:
-    metadata_file = "data/val.csv"
+    metadata_file = None#"data/val.csv"
+    if not metadata_file:
+        dataset = DummyHCCDataset(indices=indices,
+                                root_dir=root_dir,
+                                apply_liver_window=True,
+                                class_number=class_number,
+                                transform=master_transforms
+                            )
+        dataloader = DataLoader(dataset, batch_size=1, collate_fn = collate_with_metadata, shuffle=False)
+        return dataloader
     metadata_df = pd.read_csv(metadata_file)
     selected_rows = metadata_df.iloc[indices]
 
@@ -400,7 +487,7 @@ def load_metadata_indices(indices: List[int], master_transforms: Compose, root_d
                             transform=master_transforms,
                             apply_liver_window=True,
                             class_number=class_number)
-    dataloader = DataLoader(sub_dataset, batch_size=1, shuffle=False)
+    dataloader = DataLoader(sub_dataset, batch_size=1, collate_fn = collate_with_metadata, shuffle=False)
     return dataloader
 
 def load_trained_model(model_name: str, device: torch.device, class_num: int) -> torch.nn.Module| None:
@@ -456,6 +543,6 @@ def save_outputs_as_nifti(outputs: List[np.ndarray], all_metadata: List[dict], o
         volume = output[0, 0]  # Assuming batch size 1 and single channel
         metadata = all_metadata[i]
         output_path = os.path.join(output_dir, f"output_{i}.nii.gz")
-        save_val_results(volume, class_number, metadata)
+        save_val_results(volume, metadata)
 
 

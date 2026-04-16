@@ -14,18 +14,18 @@ export default function Viewer() {
   const [availableModels, setAvailableModels] = useState([]);
   const [radiomicsResult, setRadiomicsResult] = useState(null);
   const [taceResult, setTaceResult] = useState(null);
+  const [survivalResult, setSurvivalResult] = useState(null);
+  const [outcomeResult, setOutcomeResult] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
 
   useEffect(() => {
     const nv = new Niivue({
       show3Dcrosshair: true
     });
-
+    nvRef.current = nv;
     nv.attachToCanvas(canvasRef.current);
     nv.setSliceType(nv.sliceTypeMultiplanar);
     nv.opts.multiplanarShowRender = "never";
-
-    nvRef.current = nv;
 
     // Fetch available models
     fetchAvailableModels();
@@ -64,46 +64,32 @@ export default function Viewer() {
     const data = await res.json();
 
     console.log("Volume URLs:");
-    console.log(data.image, data.gt, data.pred);
+    console.log(data.image, data.gt);
 
     nvRef.current.removeAllVolumes;
+    
     const volumes = [
-      { url: data.image },
-      { url: data.gt, colormap: "blue", opacity: opacity },
-      { url: data.pred, colormap: "gold", opacity: opacity },
+      { url: data.image, colorMap: 'gray' },
+      { url: data.gt, colorMap: 'blue', opacity: opacity }
     ];
-
-    // Add imageType for DICOM
-    volumes.forEach(vol => {
-      if (vol.url.endsWith('.dcm')) {
-        vol.imageType = "DCM";
-      }
-    });
-
-    await nvRef.current.loadVolumes(volumes);
-
-    console.log("Volumes:", nvRef.current.volumes.length);
+    
+    return volumes
   }
 
   async function segmentWithModel() {
-
     const res = await fetch(`/segment/${caseID}?model_name=${selectedModel}`);
     const data = await res.json();
 
     console.log("Segmentation URL:");
     console.log(data.output_path);
 
-    const predImage = await getVolume(data.output_path, "gold", opacity)
-
-    nvRef.current.addVolume(predImage);
-
-    console.log("Volumes:", nvRef.current.volumes.length);
+    return { url: data.output_path, colorMap: 'hot', opacity: opacity };
   }
 
   async function extractRadiomics() {
     setIsLoading(true);
     try {
-      const res = await fetch(`/extract-radiomics/${caseID}`, {
+      const res = await fetch(`/extract_radiomics/${caseID}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ tissue_class: 2 }) // Default to tumor
@@ -121,7 +107,7 @@ export default function Viewer() {
   async function planTACE() {
     setIsLoading(true);
     try {
-      const res = await fetch(`/tace-plan/${caseID}`, {
+      const res = await fetch(`/tace_plan/${caseID}`, {
         method: 'POST'
       });
       const data = await res.json();
@@ -129,6 +115,42 @@ export default function Viewer() {
     } catch (err) {
       console.error("Error planning TACE:", err);
       setTaceResult({ error: err.message });
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function runSurvivalAnalysis() {
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/run_survival_analysis`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clinical_csv: 'clinical.csv', radiomics_dir: 'radiomics', output_dir: 'survival' })
+      });
+      const data = await res.json();
+      setSurvivalResult(data);
+    } catch (err) {
+      console.error("Error running survival analysis:", err);
+      setSurvivalResult({ error: err.message });
+    } finally {
+      setIsLoading(false);
+    }
+  }
+
+  async function runOutcomePrediction() {
+    setIsLoading(true);
+    try {
+      const res = await fetch(`/run_outcome_prediction`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clinical_csv: 'clinical.csv', radiomics_dir: 'radiomics', output_dir: 'outcome_prediction' })
+      });
+      const data = await res.json();
+      setOutcomeResult(data);
+    } catch (err) {
+      console.error("Error running outcome prediction:", err);
+      setOutcomeResult({ error: err.message });
     } finally {
       setIsLoading(false);
     }
@@ -160,8 +182,21 @@ export default function Viewer() {
 
   async function handleSubmit() {
     try {
-    await loadCase();
-    await segmentWithModel();
+    
+    const volumes = await loadCase();
+    const seg = await segmentWithModel();
+    volumes.push(seg);
+
+    await nvRef.current.loadVolumes(volumes);
+    
+    // Ensure overlays are visible with proper opacity
+    if (nvRef.current.volumes.length >= 2) {
+      nvRef.current.setOpacity(1, opacity);  // Ground truth
+    }
+    if (nvRef.current.volumes.length >= 3) {
+      nvRef.current.setOpacity(2, opacity);  // Segmentation
+    }
+
    }catch (err) {
       console.error("Error loading case:", err);
     }
@@ -222,6 +257,113 @@ export default function Viewer() {
         Reset Slices
       </button>
 
-    </div>
+      <br /><br />
+
+      <button onClick={extractRadiomics} disabled={isLoading || !caseID}>
+        Extract Radiomics
+      </button>
+
+      <button onClick={planTACE} disabled={isLoading || !caseID}>
+        Plan TACE
+      </button>
+
+      <button onClick={runSurvivalAnalysis} disabled={isLoading}>
+        Run Survival Analysis
+      </button>
+
+      <button onClick={runOutcomePrediction} disabled={isLoading}>
+        Run Outcome Prediction
+      </button>
+
+      {isLoading && <p>Loading...</p>}
+
+      {survivalResult && (
+        <div>
+          <h3>Survival Analysis Results</h3>
+          {survivalResult.error ? (
+            <p>Error: {survivalResult.error}</p>
+          ) : (
+            <div>
+              <p>Status: {survivalResult.status}</p>
+              <p>Output Directory: {survivalResult.output_dir}</p>
+              {survivalResult.files && survivalResult.files.length > 0 ? (
+                <div>
+                  <h4>Generated Files</h4>
+                  <ul>
+                    {survivalResult.files.map((file) => (
+                      <li key={file}><a href={file} target="_blank" rel="noopener noreferrer">{file}</a></li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <p>No files returned.</p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {outcomeResult && (
+        <div>
+          <h3>Outcome Prediction Results</h3>
+          {outcomeResult.error ? (
+            <p>Error: {outcomeResult.error}</p>
+          ) : (
+            <div>
+              <p>Status: {outcomeResult.status}</p>
+              <p>Output Directory: {outcomeResult.output_dir}</p>
+              {outcomeResult.files && outcomeResult.files.length > 0 ? (
+                <div>
+                  <h4>Generated Files</h4>
+                  <ul>
+                    {outcomeResult.files.map((file) => (
+                      <li key={file}><a href={file} target="_blank" rel="noopener noreferrer">{file}</a></li>
+                    ))}
+                  </ul>
+                </div>
+              ) : (
+                <p>No files returned.</p>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
+      {radiomicsResult && (
+        <div>
+          <h3>Radiomics Results</h3>
+          {radiomicsResult.error ? (
+            <p>Error: {radiomicsResult.error}</p>
+          ) : (
+            <pre>{JSON.stringify(radiomicsResult, null, 2)}</pre>
+          )}
+        </div>
+      )}
+
+      {taceResult && (
+        <div>
+          <h3>TACE Planning Results</h3>
+          {taceResult.error ? (
+            <p>Error: {taceResult.error}</p>
+          ) : (
+            <div>
+              <p>Case ID: {taceResult.case_id}</p>
+              <p>Report Path: <a href={taceResult.report_path} target="_blank" rel="noopener noreferrer">View Report</a></p>
+              <p>Tumor Volume: {taceResult.summary?.tumor_volume_ml} ml</p>
+              <p>Feeding Vessels: {taceResult.summary?.feeding_vessels}</p>
+              <p>TACE Feasibility: {taceResult.summary?.tace_feasibility}</p>
+              {taceResult.visualizations && (
+                <div>
+                  <h4>Visualizations</h4>
+                  {Object.entries(taceResult.visualizations).map(([key, url]) => (
+                    <p key={key}><a href={url} target="_blank" rel="noopener noreferrer">{key}</a></p>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+      </div>
   );
 }

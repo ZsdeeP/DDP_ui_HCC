@@ -5,16 +5,23 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
+import dicom2nifti
+import subprocess
+
 
 from pathlib import Path
-
+#segment all four classes and save results in same file with different class numbers, then extract the class of interest in the frontend for visualization and radiomics extraction
+#next step: select a custom window around the tumor for radiomics extraction instead of the whole image, to better capture peritumoral features and reduce noise from irrelevant areas. This will require modifying the radiomics extractor to take in a bounding box or mask for feature calculation.
+#the user should be able to define the window limits
+ 
+#important: modify the import statements to reflect the actual structure of the project and where the modules are located. The current imports assume all modules are in the same directory, which may not be the case. Adjust the import paths as needed based on your project organization. 
 import torch
 from infer_model import DummyDataset
 import pandas as pd
 import json
 import pydicom as dicom
 import monai
-from typing import List, Union, Tuple
+from typing import List, Union
 from monai.data.dataloader import DataLoader
 from monai.transforms.compose import Compose
 from monai.transforms.croppad.dictionary import (
@@ -27,10 +34,18 @@ from monai.transforms.post.dictionary import Invertd
 from infer_model import load_metadata_indices, load_trained_model, run_inference, save_val_results, collate_with_metadata
 from radiomics_extractor import RadiomicsExtractor
 from tace_planner import TACEPlanner
-from data_utils import read_dicom_series, read_segmentation_dicom
+from survival_analysis import run_survival_analysis
+from outcome_predictor import run_outcome_prediction
+#replace these data_utils placeholders with the actual functions from the repo
+from data_utils import read_dicom_series, read_segmentation_dicom, calculate_transform_matrix, generate_coordinate_matrix 
 
 class ModelSelect(BaseModel):
     models: str
+
+class AnalysisRequest(BaseModel):
+    clinical_csv: str = "clinical.csv"
+    radiomics_dir: str = "radiomics"
+    output_dir: str = "survival"
 
 ROOT_DIR = Path(__file__).resolve().parent #PLACEHOLDER
 PATCH_SIZE = [64, 64, 64] #FROZEN
@@ -48,6 +63,54 @@ app.mount("/data", StaticFiles(directory=data_path), name="data")
 
 #templates = Jinja2Templates(directory=templates_path)
 
+def handle_dcm_paths(case_id: str, dcm_path: Path, nii_gz_path: Path, suffix: str, cat:str, base_cat="base_images"):
+    seg_file_name = [file_path for file_path in dcm_path.glob("*") if file_path.is_file()]
+    
+    if len(seg_file_name) == 1:
+        # Handle segmentation - use the converted volume's affine for consistency
+        # First, ensure the volume has been converted
+        volume_path = data_path / base_cat / f"{case_id}.nii.gz"
+        if not volume_path.exists():
+            volume_path = data_path / base_cat / f"{case_id}.nii"
+        
+        if not volume_path.exists():
+            raise FileNotFoundError(f"Volume file not found for {case_id} in {base_cat}. Please convert the volume first.")
+        
+        # Load the volume to get its affine matrix
+        volume_nib = nib.load(volume_path)
+        #print(volume_nib.get_fdata().shape)
+        affine = volume_nib.affine
+        
+        # Read segmentation
+        seg_volume = read_segmentation_dicom(str(dcm_path / seg_file_name[0]), class_number=1)
+        #seg_volume = np.transpose(seg_volume, (1, 2, 0))  # Reorient to match volume orientation
+        #print(seg_volume.shape)
+        
+        # Apply the volume's affine to the segmentation
+        converted_file = nib.Nifti1Image(seg_volume.astype(np.float32), affine=affine)
+        nib.save(img=converted_file, filename=nii_gz_path)
+    else:
+        volume, metadata = read_dicom_series(str(dcm_path))
+        m_lps2ras = calculate_transform_matrix("LPS", "RAS")
+        affine = metadata.get("affine", np.eye(4))
+        nifti_affine = np.eye(4)
+        m_dicom2nifti = np.linalg.inv(m_lps2ras @ nifti_affine) @ affine
+        #print(volume.shape)
+        converted_file = nib.Nifti1Image(volume.astype(np.float32), affine=m_dicom2nifti)
+        nib.save(img=converted_file, filename=nii_gz_path)
+        '''# Use dcm2niix for regular DICOM series
+        output_dir = str(nii_gz_path.parent)
+        filename = nii_gz_path.stem  # filename without .nii.gz
+        if filename.endswith(".nii"):
+            filename = filename[:-4]  # remove .nii if present
+        cmd = f"dcm2niix -z y -f {filename} -o {output_dir} {str(dcm_path)}"
+        subprocess.run(cmd, shell=True, check=True)'''
+    
+    print(f" NiFti File saved to {nii_gz_path.name}")
+    return f"/data/{cat}/{case_id}{suffix}.nii.gz"
+
+
+
 def get_image_path(case_id: str, suffix: str = "", category: int = 0, model_name: str = "model1") -> str:
     cat_dict = {0: "base_images", 1: "ground_truths", 2: "segmentations"}
 
@@ -55,21 +118,41 @@ def get_image_path(case_id: str, suffix: str = "", category: int = 0, model_name
         pred_path = data_path / "segmentations" / model_name / f"{case_id}_pred.nii.gz"
         if pred_path.exists():
             return f"/data/segmentations/{model_name}/{case_id}_pred.nii.gz"
+        elif (data_path / "segmentations" / model_name / f"{case_id}_pred.nii").exists():
+            return f"/data/segmentations/{model_name}/{case_id}_pred.nii"
         else:
-            raise FileNotFoundError(f"No segmentation file found for {case_id} with model {model_name}")
+            pred_dcm_path = data_path / "segmentations" / model_name / f"{case_id}_pred"
+            if pred_dcm_path.exists():
+                dcm2nii_path = handle_dcm_paths(case_id, pred_dcm_path, pred_path, "_pred", cat_dict[category], "base_images")
+                return dcm2nii_path
+            else:
+                raise FileNotFoundError(f"No segmentation file found for {case_id} with model {model_name}")
 
     nii_path = data_path / cat_dict[category] / f"{case_id}{suffix}.nii"
     nii_gz_path = data_path / cat_dict[category] / f"{case_id}{suffix}.nii.gz"
 
-    dcm_path = data_path / cat_dict[category] / f"{case_id}{suffix}.dcm"
+    dcm_path = data_path / cat_dict[category] / f"{case_id}{suffix}"
     if nii_path.exists():
         return f"/data/{cat_dict[category]}/{case_id}{suffix}.nii"
     elif nii_gz_path.exists():
         return f"/data/{cat_dict[category]}/{case_id}{suffix}.nii.gz"
     elif dcm_path.exists():
-        return f"/data/{cat_dict[category]}/{case_id}{suffix}.dcm"
+        return handle_dcm_paths(case_id, dcm_path, nii_gz_path, suffix, cat_dict[category], "base_images")
+        
     else:
         raise FileNotFoundError(f"No image file found for {case_id}{suffix}")
+
+
+def build_analysis_file_list(output_dir: Path):
+    if not output_dir.exists():
+        return []
+    files = []
+    for file_path in sorted(output_dir.rglob("*")):
+        if file_path.is_file():
+            rel_path = file_path.relative_to(data_path)
+            files.append(f"/data/{rel_path}")
+    return files
+
 
 def segment_images(case_id: str, model_name: str, class_number: int, patch_size: List[int]):
     master_transforms = Compose([EnsureTyped(keys=["image", "label"]),
@@ -88,24 +171,29 @@ def segment_images(case_id: str, model_name: str, class_number: int, patch_size:
     else:
         #load nifti image directly and create dataloader with dummy label and metadata
         #account for dicom images and segmentations as well
-        image_path = get_image_path(case_id, category=0)
-        label_path = get_image_path(case_id, "_gt", category=1)
-        if image_path.endswith(".dcm"):
+        image_path = Path(get_image_path(case_id, category=0))
+        label_path = Path(get_image_path(case_id, "_gt", category=1))
+
+        if image_path.is_dir() and label_path.is_dir():
             image, metadata = read_dicom_series(str(image_path))
+            image = np.transpose(image, (1, 2, 0))
             label = read_segmentation_dicom(str(label_path)) 
+            label = np.transpose(label, (1, 2, 0))
+
             data = [{"image": image, 
                      "label": label, 
                      "metadata": {**metadata}
                     }]
     
-        elif image_path.endswith(".nii.gz") or image_path.endswith(".nii"):
+        elif (image_path.suffix == ".nii.gz" or image_path.suffix == ".nii") and \
+             (label_path.suffix == ".nii.gz" or label_path.suffix == ".nii"):
             image = nib.load(get_image_path(case_id)).get_fdata() # type: ignore
             label = nib.load(get_image_path(case_id, "_gt", category=1)).get_fdata() if (data_path / f"{case_id}_gt.nii.gz").exists() else np.zeros_like(image) # type: ignore
             data = [{"image": image, "label": label, "metadata": {"affine": np.eye(4)}}]
         else:
             raise ValueError(f"Unsupported file format for case {case_id}")
         
-        dataset = DummyDataset(data, master_transforms)
+        dataset = DummyDataset(data, master_transforms) #replace with actual HCCDataset
         dataloader = DataLoader(dataset, batch_size=1, collate_fn=collate_with_metadata)
 
     model = load_trained_model(model_name, device, class_number)
@@ -114,7 +202,7 @@ def segment_images(case_id: str, model_name: str, class_number: int, patch_size:
     else:
         labels = None
         all_metadata = None
-        for batch in next(iter(dataloader)):
+        for i, batch in enumerate(dataloader):
             inputs = batch["image"].to(device)
             labels = batch["label"].to(device)
             all_metadata = batch["metadata"]
@@ -123,13 +211,27 @@ def segment_images(case_id: str, model_name: str, class_number: int, patch_size:
 
 @app.get("/segment/{case_id}")
 def segment_case(case_id: str, model_name: str):
-    if data_path / "segmentations" / model_name / f"{case_id}_pred.nii.gz" in data_path.glob(f"segmentations/{model_name}/{case_id}_pred.nii.gz"):
-        return {"output_path": f"/data/segmentations/{model_name}/{case_id}_pred.nii.gz"}
+    seg_dir = data_path / "segmentations" / model_name
+    seg_nifti_gz = seg_dir / f"{case_id}_pred.nii.gz"
+    seg_nifti = seg_dir / f"{case_id}_pred.nii"
+    seg_dcm_dir = seg_dir / f"{case_id}_pred"
 
-    Path.mkdir(data_path / "segmentations" / model_name, exist_ok=True)
+    if seg_nifti_gz.exists():
+        return {"output_path": f"/data/segmentations/{model_name}/{case_id}_pred.nii.gz"}
+    elif seg_nifti.exists():
+        return {"output_path": f"/data/segmentations/{model_name}/{case_id}_pred.nii"}
+    elif seg_dcm_dir.exists():
+        try:
+            converted_file = handle_dcm_paths(case_id, seg_dcm_dir, seg_nifti_gz, "_pred", "segmentations", "base_images")
+            return {"output_path": f"/data/segmentations/{model_name}/{Path(converted_file).name}"}
+        except subprocess.CalledProcessError as e:
+            raise FileNotFoundError(f"Failed to convert segmentation DICOM to NIfTI: {e}")
+
+    Path.mkdir(seg_dir, parents=True, exist_ok=True)
     result_list = []
     affine0 = np.eye(4)
-    for class_nums in range(1, 5):
+    for class_nums in range(1, 5): #segment each class separately and save results in same file with different class numbers,
+        # then extract the class of interest. Only meant for the HCC-TACE dataset
         outputs, all_metadata, dice = segment_images(case_id, model_name, class_nums, PATCH_SIZE)
         result, affine0 = save_val_results(outputs, class_nums, all_metadata)
         result_list.append(result*class_nums)
@@ -165,7 +267,7 @@ def get_available_models():
     return ['model1']
 
 
-@app.post("/extract-radiomics/{case_id}")
+@app.post("/extract_radiomics/{case_id}")
 def extract_radiomics(case_id: str, tissue_class: int = 2):
     """Extract radiomics features from a segmented case"""
     try:
@@ -182,7 +284,7 @@ def extract_radiomics(case_id: str, tissue_class: int = 2):
         # Extract features
         extractor = RadiomicsExtractor(class_number=tissue_class)
         features = extractor.extract_features_from_patient(str(scan_folder), str(seg_file), case_id)
-
+        print("features extracted:", features)
         if features is None:
             return JSONResponse(status_code=400, content={"error": "Failed to extract features"})
 
@@ -205,7 +307,53 @@ def extract_radiomics(case_id: str, tissue_class: int = 2):
         return JSONResponse(status_code=500, content={"error": str(e)})
 
 
-@app.post("/tace-plan/{case_id}")
+@app.post("/run_survival_analysis")
+def run_survival_analysis_endpoint(request: AnalysisRequest):
+    clinical_path = data_path / request.clinical_csv
+    radiomics_path = data_path / request.radiomics_dir
+    output_path = data_path / request.output_dir
+
+    if not clinical_path.exists():
+        return JSONResponse(status_code=404, content={"error": f"Clinical data not found: {clinical_path}"})
+    if not radiomics_path.exists():
+        return JSONResponse(status_code=404, content={"error": f"Radiomics directory not found: {radiomics_path}"})
+
+    output_path.mkdir(parents=True, exist_ok=True)
+    try:
+        run_survival_analysis(str(clinical_path), radiomics_dir=str(radiomics_path), output_dir=str(output_path))
+        return {
+            "status": "complete",
+            "output_dir": f"/data/{request.output_dir}",
+            "files": build_analysis_file_list(output_path)
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/run_outcome_prediction")
+def run_outcome_prediction_endpoint(request: AnalysisRequest):
+    clinical_path = data_path / request.clinical_csv
+    radiomics_path = data_path / request.radiomics_dir
+    output_path = data_path / request.output_dir
+
+    if not clinical_path.exists():
+        return JSONResponse(status_code=404, content={"error": f"Clinical data not found: {clinical_path}"})
+    if not radiomics_path.exists():
+        return JSONResponse(status_code=404, content={"error": f"Radiomics directory not found: {radiomics_path}"})
+
+    output_path.mkdir(parents=True, exist_ok=True)
+    try:
+        run_outcome_prediction(str(clinical_path), radiomics_dir=str(radiomics_path), output_dir=str(output_path))
+        return {
+            "status": "complete",
+            "output_dir": f"/data/{request.output_dir}",
+            "files": build_analysis_file_list(output_path)
+        }
+    except Exception as e:
+        return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/tace_plan/{case_id}")
 def plan_tace_procedure(case_id: str):
     """Run TACE planning analysis on a case"""
     try:
