@@ -5,9 +5,22 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pathlib import Path
+import shutil
+
+CLASS_NAME = "abdominalaorta"
+IS_VAL = True
+
+target_dir = "train"
+if IS_VAL:
+    target_dir = "val"
 
 current_dir = Path(__file__).resolve().parent
 parent_dir = current_dir.parent
+#data_dir = parent_dir / "nifti_data" / target_dir
+
+#images_dir = data_dir / CLASS_NAME / "ct_HCC" / "imagesTr"
+#labels_dir = data_dir / CLASS_NAME / "ct_HCC" / "labelsTr"
+
 
 static_path = current_dir / "static"
 templates_path = static_path / "templates"
@@ -19,9 +32,16 @@ app.mount("/data", StaticFiles(directory=data_path), name="data")
 
 #templates = Jinja2Templates(directory=templates_path)
 
+
 def compute_error_maps(case_id: str):
-    gt = nib.load(data_path/f"{case_id}_gt.nii.gz").get_fdata()
-    pred = nib.load(f"{data_path}/{case_id}_pred.nii.gz").get_fdata()
+    """
+    Computes error maps (false positives and false negatives)
+    
+    :param case_id: the id number (e.g. 2)
+    :type case_id: str
+    """
+    gt = nib.load(f"{data_path}/label{case_id}.nii.gz").get_fdata()
+    pred = nib.load(f"{data_path}/label{case_id}.nii.gz").get_fdata()
 
     gt = gt > 0
     pred = pred > 0
@@ -29,8 +49,8 @@ def compute_error_maps(case_id: str):
     fp = np.logical_and(pred, np.logical_not(gt))
     fn = np.logical_and(gt, np.logical_not(pred))
 
-    fp_path = data_path/f"{case_id}_fp.nii.gz"
-    fn_path = data_path/f"{case_id}_fn.nii.gz"
+    fp_path = f"data/{case_id}_fp.nii.gz"
+    fn_path = f"data/{case_id}_fn.nii.gz"
 
     nib.save(nib.Nifti1Image(fp.astype(np.uint8), np.eye(4)), fp_path)
     nib.save(nib.Nifti1Image(fn.astype(np.uint8), np.eye(4)), fn_path)
@@ -38,12 +58,21 @@ def compute_error_maps(case_id: str):
     return fp_path, fn_path
 
 
+'''def copy_to_data(case_id:str):
+    image_path = images_dir / f"{case_id}.nii.gz"
+    label_path = labels_dir / f"{case_id}.nii.gz"
+    shutil.copy2(image_path, data_path)
+    shutil.copy2(label_path, data_path)'''
+
+
+
 
 @app.get("/load/{case_id}")
-def load_gts(case_id: str):
-    image_path = f"/data/{case_id}.nii.gz"
-    gt_path = f"/data/{case_id}_gt.nii.gz"
-    pred_path = f"/data/{case_id}_pred.nii.gz"
+def load_gts(case_id: str): #nifti_data/val/abdominalaorta/ct_HCC/imagesTr/29.nii.gz
+    #copy_to_data(case_id)
+    image_path = f"data/image{case_id}.nii.gz"
+    gt_path = f"data/label{case_id}.nii.gz"
+    pred_path = f"data/label{case_id}.nii.gz" #change this
 
     return {
         "image" : image_path,
@@ -64,8 +93,8 @@ def get_error_maps(case_id: str):
 @app.get("/largest_error_slice/{case_id}")
 def largest_error_slice(case_id: str):
 
-    gt = nib.load(f"{data_path}/{case_id}_gt.nii.gz").get_fdata()
-    pred = nib.load(f"{data_path}/{case_id}_pred.nii.gz").get_fdata()
+    gt = nib.load(f"{data_path}/label{case_id}.nii.gz").get_fdata() #change
+    pred = nib.load(f"{data_path}/label{case_id}.nii.gz").get_fdata() #change
 
     error = np.logical_xor(gt > 0, pred > 0)
 

@@ -96,7 +96,7 @@ export default function Viewer() {
     const cz = vol.dims[3];
 
     nv.moveCrosshairInVox(cx, cy, cz);
-    nv.moveCrosshairInVox(-cx/2, -cy/2, -cz/2)
+    nv.moveCrosshairInVox(-cx/2, -cy/2, -cz/2);
   }
 
   function toggleFP(enabled){
@@ -125,7 +125,12 @@ export default function Viewer() {
     const res = await fetch(`/largest_error_slice/${caseID}`);
     const data = await res.json();
 
-    nvRef.current.setSlice(data.slice);
+    const nv = nvRef.current;
+
+    if (!nv || nv.volumes.length === 0) return;
+    resetSlices()
+
+    nv.moveCrosshairInVox(data.error_voxels);
   }
 
   return (
