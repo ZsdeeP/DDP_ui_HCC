@@ -7,9 +7,12 @@ export default defineConfig({
     proxy: {
       "/load": "http://localhost:8000",
       "/data": "http://localhost:8000",
-      "/error": "http://localhost:8000",
-      "/largest_error_slice": "http://localhost:8000",
-      "/metrics": "http://localhost:8000"
+      "/segment": "http://localhost:8000",
+      "/models": "http://localhost:8000",
+      "/extract_radiomics": "http://localhost:8000",
+      "/tace_plan": "http://localhost:8000",
+      "/run_survival_analysis": "http://localhost:8000",
+      "/run_outcome_prediction": "http://localhost:8000"
     }
   }
 });
