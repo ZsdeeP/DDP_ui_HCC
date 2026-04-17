@@ -12,18 +12,19 @@ from data_utils import read_dicom_series, read_segmentation_dicom, apply_window
 class RadiomicsExtractor:
     """Extract radiomics features"""
 
-    def __init__(self, class_number=2, apply_liver_window=True, wc=150, ww=250):
+    # Mapping of class numbers to tissue names
+    CLASS_NAMES = {1: 'liver', 2: 'tumor', 3: 'bloodvessels', 4: 'abdominalaorta'}
+
+    def __init__(self, apply_liver_window=True, wc=150, ww=250):
         """
         Initialize radiomics extractor
 
         Args:
-            class_number: Which tissue class to extract features from
-                         1=liver, 2=tumour, 3=bloodvessels, 4=abdominalaorta
             apply_liver_window: Whether to apply windowing to CT images
             wc: Window center for CT windowing
             ww: Window width for CT windowing
         """
-        self.class_number = class_number
+        self.class_numbers = [1, 2, 3, 4]
         self.apply_liver_window = apply_liver_window
         self.wc = wc
         self.ww = ww
@@ -127,17 +128,18 @@ class RadiomicsExtractor:
         else:
             raise ValueError(f"Invalid segmentation path: {seg_path}. Must be a DICOM SEG file or NIfTI file.")
 
-    def extract_features_from_patient(self, scan_folder, seg_file, patient_id):
+    def extract_features_from_patient(self, scan_folder, seg_file, patient_id, output_dir=None):
         """
-        Extract radiomics features for a single patient
+        Extract radiomics features for a single patient for all tissue classes
 
         Args:
             scan_folder: Path to DICOM series folder or NIfTI volume file
             seg_file: Path to segmentation DICOM file or NIfTI file
             patient_id: Patient identifier
+            output_dir: Optional directory to save CSV files per class
 
         Returns:
-            dict: Dictionary of features with patient_id
+            dict: Dictionary of {class_name: features_dict} for all classes
         """
         try:
             # Load CT volume
@@ -147,62 +149,74 @@ class RadiomicsExtractor:
             if self.apply_liver_window:
                 volume = apply_window(volume, window_center=self.wc, window_width=self.ww)
 
-            # Load segmentation mask
-            segmentation = self._load_segmentation(seg_file, class_number=self.class_number)
+            # Load full multi-label segmentation
+            segmentation = self._load_segmentation(seg_file, class_number=None)
 
-            if np.sum(segmentation) == 0:
-                logging.warning(f"Empty mask for {patient_id}, class {self.class_number}")
-                return None
-
-            # Convert to SimpleITK images
+            # Convert volume to SimpleITK
             volume_sitk = sitk.GetImageFromArray(volume)
-            mask_sitk = sitk.GetImageFromArray(segmentation)
-
-            # Set spacing from metadata
             if 'spacing' in metadata:
-                spacing = metadata['spacing']
-                volume_sitk.SetSpacing(spacing)
-                mask_sitk.SetSpacing(spacing)
+                volume_sitk.SetSpacing(metadata['spacing'])
 
-            # Extract features
-            features = self.extractor.execute(volume_sitk, mask_sitk)
+            # Extract features for each class
+            all_features = {}
+            for class_num in self.class_numbers:
+                binary_mask = (segmentation == class_num).astype(np.float32)
+                
+                if np.sum(binary_mask) == 0:
+                    logging.warning(f"Empty mask for {patient_id}, class {class_num}")
+                    all_features[self.CLASS_NAMES[class_num]] = None
+                    continue
 
-            # Convert to regular dict and filter out diagnostic info
-            feature_dict = {
-                'patient_id': patient_id,
-                'class_number': self.class_number
-            }
+                # Convert mask to SimpleITK
+                mask_sitk = sitk.GetImageFromArray(binary_mask)
+                if 'spacing' in metadata:
+                    mask_sitk.SetSpacing(metadata['spacing'])
 
-            for key, value in features.items():
-                # Skip diagnostic information
-                if not key.startswith('diagnostics_'):
-                    # Convert numpy types to Python types
-                    if isinstance(value, (np.integer, np.floating)):
-                        value = float(value)
-                    feature_dict[key] = value
+                # Extract features
+                features = self.extractor.execute(volume_sitk, mask_sitk)
 
-            return feature_dict
+                # Convert to regular dict and filter out diagnostic info
+                feature_dict = {'patient_id': patient_id}
+
+                for key, value in features.items():
+                    # Skip diagnostic information
+                    if not key.startswith('diagnostics_'):
+                        # Convert numpy types to Python types
+                        if isinstance(value, (np.integer, np.floating)):
+                            value = float(value)
+                        feature_dict[key] = value
+
+                all_features[self.CLASS_NAMES[class_num]] = feature_dict
+
+                # Save to CSV if output directory is specified
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
+                    csv_path = os.path.join(output_dir, f"{patient_id}_radiomics_{self.CLASS_NAMES[class_num]}.csv")
+                    df = pd.DataFrame([feature_dict])
+                    df.to_csv(csv_path, index=False)
+
+            return all_features
 
         except Exception as e:
             logging.error(f"Error extracting features for {patient_id}: {str(e)}")
             return None
 
-    def extract_features_from_metadata(self, metadata_csv, root_dir, output_csv=None):
+    def extract_features_from_metadata(self, metadata_csv, root_dir, output_dir=None):
         """
         Extract radiomics features for all patients in metadata CSV
 
         Args:
             metadata_csv: Path to metadata CSV file
             root_dir: Root directory containing data
-            output_csv: Path to save features CSV (optional)
+            output_dir: Directory to save CSV files per class and patient
 
         Returns:
-            pd.DataFrame: DataFrame of extracted features
+            dict: Dictionary of {class_name: DataFrame} for all classes
         """
         metadata_df = pd.read_csv(metadata_csv)
-        feature_list = []
+        features_per_class = {class_name: [] for class_name in self.CLASS_NAMES.values()}
 
-        print(f"Extracting radiomics features for class {self.class_number}...")
+        print(f"Extracting radiomics features for all 4 classes...")
         print(f"Processing {len(metadata_df)} patients...")
 
         for idx, row in tqdm(metadata_df.iterrows(), total=len(metadata_df)):
@@ -210,20 +224,28 @@ class RadiomicsExtractor:
             scan_folder = os.path.join(root_dir, row['SCAN_FOLDER'])
             seg_file = os.path.join(root_dir, row['SEGMENTATION_FILE'])
 
-            features = self.extract_features_from_patient(scan_folder, seg_file, patient_id)
+            features = self.extract_features_from_patient(scan_folder, seg_file, patient_id, output_dir)
 
             if features is not None:
-                feature_list.append(features)
+                for class_name, feature_dict in features.items():
+                    if feature_dict is not None:
+                        features_per_class[class_name].append(feature_dict)
 
-        # Create DataFrame
-        features_df = pd.DataFrame(feature_list)
+        # Create DataFrames for each class
+        result_dfs = {}
+        for class_name, feature_list in features_per_class.items():
+            if feature_list:
+                features_df = pd.DataFrame(feature_list)
+                result_dfs[class_name] = features_df
+                
+                # Save consolidated CSV for the class if output_dir is specified
+                if output_dir:
+                    os.makedirs(output_dir, exist_ok=True)
+                    csv_path = os.path.join(output_dir, f"radiomics_{class_name}.csv")
+                    features_df.to_csv(csv_path, index=False)
+                    print(f"Features for {class_name} saved to {csv_path}")
+                
+                print(f"\nExtracted {len(features_df)} feature sets for {class_name}")
+                print(f"Number of features per patient: {len(features_df.columns) - 1}")  # Exclude patient_id
 
-        print(f"\nExtracted {len(features_df)} feature sets")
-        print(f"Number of features per patient: {len(features_df.columns) - 2}")  # Exclude patient_id and class_number
-
-        # Save to CSV if requested
-        if output_csv:
-            features_df.to_csv(output_csv, index=False)
-            print(f"Features saved to {output_csv}")
-
-        return features_df
+        return result_dfs

@@ -224,8 +224,10 @@ def read_segmentation_dicom(file_path, class_number=None):
     if class_number is not None:
         seg_array = result.segment_data(class_number)
     else:
-        segments = []
+        # Create multi-label volume where each voxel contains the class number
+        first_segment = result.segment_data(1)
+        seg_array = np.zeros_like(first_segment, dtype=np.uint8)
         for segment_number, _ in segments_info.items():
-            segments.append(result.segment_data(segment_number))
-        seg_array = np.stack(segments, axis=0)
+            mask = result.segment_data(segment_number)
+            seg_array[mask > 0] = segment_number
     return seg_array.astype(np.float32)

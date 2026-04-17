@@ -87,7 +87,17 @@ def handle_dcm_paths(case_id: str, dcm_path: Path, nii_gz_path: Path, suffix: st
         affine = volume_nib.affine
         
         # Read segmentation
-        seg_volume = read_segmentation_dicom(str(dcm_path / seg_file_name[0]), class_number=1)
+        seg_volume1 = read_segmentation_dicom(str(dcm_path / seg_file_name[0]), class_number=1)
+        seg_volume2 = read_segmentation_dicom(str(dcm_path / seg_file_name[0]), class_number=2)
+        seg_volume3 = read_segmentation_dicom(str(dcm_path / seg_file_name[0]), class_number=3)
+        seg_volume4 = read_segmentation_dicom(str(dcm_path / seg_file_name[0]), class_number=4)
+        seg_volume = np.zeros_like(seg_volume1, dtype=np.uint8)
+        seg_volume[seg_volume1 > 0] = 1
+        seg_volume[seg_volume2 > 0] = 2
+        seg_volume[seg_volume3 > 0] = 3 
+        seg_volume[seg_volume4 > 0] = 4
+
+
         #seg_volume = np.transpose(seg_volume, (1, 2, 0))  # Reorient to match volume orientation
         #print(seg_volume.shape)
         
@@ -281,8 +291,8 @@ def get_available_models():
 
 
 @app.post("/extract_radiomics/{case_id}")
-def extract_radiomics(case_id: str, tissue_class: int = 2):
-    """Extract radiomics features from a segmented case"""
+def extract_radiomics(case_id: str):
+    """Extract radiomics features from a segmented case for all tissue classes"""
     try:
         # Find scan folder and segmentation file
         scan_folder = data_path / "base_images" / case_id
@@ -294,26 +304,29 @@ def extract_radiomics(case_id: str, tissue_class: int = 2):
         if not seg_file.exists():
             return JSONResponse(status_code=404, content={"error": f"Segmentation file not found: {seg_file}"})
 
-        # Extract features
-        extractor = RadiomicsExtractor(class_number=tissue_class)
-        features = extractor.extract_features_from_patient(str(scan_folder), str(seg_file), case_id)
-        print("features extracted:", features)
-        if features is None:
-            return JSONResponse(status_code=400, content={"error": "Failed to extract features"})
-
-        # Save features to CSV
-        features_df = pd.DataFrame([features])
+        # Extract features for all tissue classes
         output_dir = data_path / "radiomics"
         output_dir.mkdir(exist_ok=True)
-        csv_path = output_dir / f"{case_id}_radiomics_class_{tissue_class}.csv"
-        features_df.to_csv(csv_path, index=False)
+        
+        extractor = RadiomicsExtractor()
+        features_dict = extractor.extract_features_from_patient(str(scan_folder), str(seg_file), case_id, output_dir=str(output_dir))
+        print("features extracted:", features_dict)
+        if features_dict is None:
+            return JSONResponse(status_code=400, content={"error": "Failed to extract features"})
+
+        # Prepare response with paths to saved CSV files
+        csv_paths = {}
+        feature_counts = {}
+        for class_name in extractor.CLASS_NAMES.values():
+            if features_dict.get(class_name):
+                csv_paths[class_name] = f"/data/radiomics/{case_id}_radiomics_{class_name}.csv"
+                feature_counts[class_name] = len(features_dict[class_name]) - 1  # Exclude patient_id
 
         return {
             "case_id": case_id,
-            "tissue_class": tissue_class,
-            "features_count": len(features) - 2,  # Exclude patient_id and class_number
-            "csv_path": f"/data/radiomics/{case_id}_radiomics_class_{tissue_class}.csv",
-            "features": features
+            "status": "success",
+            "csv_paths": csv_paths,
+            "feature_counts": feature_counts
         }
 
     except Exception as e:

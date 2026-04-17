@@ -1560,17 +1560,20 @@ async def handle_call_tool(
         scan_folder = arguments.get("scan_folder")
         seg_file = arguments.get("seg_file")
         patient_id = arguments.get("patient_id")
-        tissue_class = arguments.get("tissue_class", 2)
+        output_dir = arguments.get("output_dir", None)
 
         try:
-            extractor = RadiomicsExtractor(class_number=int(tissue_class))
-            features = extractor.extract_features_from_patient(scan_folder, seg_file, patient_id)
+            extractor = RadiomicsExtractor()
+            features_dict = extractor.extract_features_from_patient(scan_folder, seg_file, patient_id, output_dir=output_dir)
 
-            if features:
+            if features_dict:
+                # Count total features across all classes
+                total_features = sum(len(f) - 1 for f in features_dict.values() if f is not None)
+                class_list = [name for name, f in features_dict.items() if f is not None]
                 return [
                     types.TextContent(
                         type="text",
-                        text=f"Successfully extracted {len(features)} radiomics features for patient {patient_id} (Class {tissue_class})."
+                        text=f"Successfully extracted radiomics features for patient {patient_id}.\nClasses processed: {', '.join(class_list)}\nTotal features extracted: {total_features}"
                     )
                 ]
             else:
