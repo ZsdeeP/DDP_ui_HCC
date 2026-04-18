@@ -630,17 +630,14 @@ def run_outcome_prediction(clinical_csv, radiomics_dir='results/radiomics', outp
 
     print("\nLoading radiomics features by anatomical region...")
     for region in region_names:
-        train_file = Path(radiomics_dir) / f'radiomics_features_{region}_train.csv'
-        val_file = Path(radiomics_dir) / f'radiomics_features_{region}_val.csv'
-
+        pattern = f"*_radiomics_{region}.csv"
+        files = list(Path(radiomics_dir).glob(pattern))
         dfs = []
-        if train_file.exists():
-            dfs.append(pd.read_csv(train_file))
-        if val_file.exists():
-            dfs.append(pd.read_csv(val_file))
+        for file in files:
+            dfs.append(pd.read_csv(file))
 
         if dfs:
-            # Combine train and val
+            # Combine all
             region_df = pd.concat(dfs, ignore_index=True)
             # Remove duplicate columns if any
             region_df = region_df.loc[:, ~region_df.columns.duplicated()]
