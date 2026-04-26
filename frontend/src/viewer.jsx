@@ -1,11 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { Niivue, NVImage } from "@niivue/niivue";
+import { Dcm2niix } from '@niivue/dcm2niix';
 import "./Viewer.css";
 
 export default function Viewer() {
 
   const canvasRef = useRef(null);
   const nvRef = useRef(null);
+  const dcm2niixRef = useRef(null);
   const volumeCache = useRef({});
 
   const [caseID, setCaseID] = useState("");
@@ -17,6 +19,7 @@ export default function Viewer() {
   const [survivalResult, setSurvivalResult] = useState(null);
   const [outcomeResult, setOutcomeResult] = useState(null);
   const [isLoading, setIsLoading] = useState(false);
+  const [statusMessage, setStatusMessage] = useState("");
 
   useEffect(() => {
     const nv = new Niivue({
@@ -27,16 +30,153 @@ export default function Viewer() {
     nv.setSliceType(nv.sliceTypeMultiplanar);
     nv.opts.multiplanarShowRender = "never";
 
+    const dcm2niix = new Dcm2niix();
+    dcm2niix.init()
+      .then(() => {
+        dcm2niixRef.current = dcm2niix;
+      })
+      .catch((err) => {
+        console.warn("Dcm2niix initialization failed:", err);
+      });
+
     // Fetch available models
     fetchAvailableModels();
 
     console.log("Niivue initialized");
+    if (!nvRef.current) return;
+    nvRef.current.onLocationChange = (data) => {
+      // data.vox is [x, y, z] in voxel space
+      onSliceChange(data.vox[2]);   // z = axial slice index
+  };
 
   }, []);
+
+  const isDicomDir = (url) => typeof url === 'string' && url.endsWith('/');
+  const isNiftiUrl = (url) => typeof url === 'string' && (url.endsWith('.nii') || url.endsWith('.nii.gz'));
+
+  async function fetchDicomFileUrls(url) {
+    const res = await fetch(`/dicom_files?url=${encodeURIComponent(url)}`);
+    if (!res.ok) {
+      throw new Error(`Unable to list DICOM series: ${res.statusText}`);
+    }
+    const data = await res.json();
+    return data.files || [];
+  }
+  /*
+  async function convertDicomSeries(url) {
+    if (!dcm2niixRef.current) {
+      throw new Error('Dcm2niix is not initialized');
+    }
+
+    setStatusMessage('Fetching DICOM series files...');
+    const fileUrls = await fetchDicomFileUrls(url);
+    if (!fileUrls.length) {
+      throw new Error(`No DICOM files found at ${url}`);
+    }
+
+    setStatusMessage('Converting DICOM series to NIfTI...');
+    console.log("DICOM file URLs:", fileUrls);
+
+    const fileObjects = await Promise.all(fileUrls.map(async (fileUrl) => {
+      const res = await fetch(fileUrl);
+      console.log(`Fetching DICOM : ${fileUrl}`);
+      if (!res.ok) {
+        throw new Error(`Failed to fetch DICOM file ${fileUrl}`);
+      }
+      const blob = await res.blob();
+      const fileName = fileUrl.substring(fileUrl.lastIndexOf('/') + 1);
+      const file = new File([blob], fileName, { type: blob.type || 'application/dicom' });
+      file._webkitRelativePath = fileName;
+      return file;
+    }));*/
+
+  async function convertDicomSeries(url) {
+    if (!dcm2niixRef.current) {
+      throw new Error('Dcm2niix is not initialized');
+    }
+    setStatusMessage('Fetching DICOM series files...');
+    const allFileUrls = await fetchDicomFileUrls(url);
+    if (!allFileUrls.length) {
+      throw new Error(`No DICOM files found at ${url}`);
+    }
+
+    // Filter strategy: try "1-" first, then "2-", then all files
+    const getFileName = (fileUrl) => fileUrl.substring(fileUrl.lastIndexOf('/') + 1);
+    const prefix1 = allFileUrls.filter(u => getFileName(u).startsWith('1-'));
+    const prefix2 = allFileUrls.filter(u => getFileName(u).startsWith('2-'));
+    
+    let fileUrls;
+    if (prefix1.length > 0) {
+      console.log(`Using ${prefix1.length} files with prefix "1-"`);
+      fileUrls = prefix1;
+    } else if (prefix2.length > 0) {
+      console.log(`Using ${prefix2.length} files with prefix "2-"`);
+      fileUrls = prefix2;
+    } else {
+      console.log(`No prefix match found, loading all ${allFileUrls.length} DICOM files`);
+      fileUrls = allFileUrls;
+    }
+
+    setStatusMessage('Converting DICOM series to NIfTI...');
+    console.log("DICOM file URLs:", fileUrls);
+
+    const fileObjects = await Promise.all(fileUrls.map(async (fileUrl) => {
+      const res = await fetch(fileUrl);
+      console.log(`Fetching DICOM: ${fileUrl}`);
+      if (!res.ok) {
+        throw new Error(`Failed to fetch DICOM file ${fileUrl}`);
+      }
+      const blob = await res.blob();
+      const fileName = getFileName(fileUrl);
+      const file = new File([blob], fileName, { type: blob.type || 'application/dicom' });
+      file._webkitRelativePath = fileName;
+      return file;
+    }));
+
+    console.log("File objects for conversion:", fileObjects);
+    const convertedFiles = await dcm2niixRef.current.input(fileObjects).run();
+    const niftiFile = convertedFiles.find((file) => file.name.endsWith('.nii') || file.name.endsWith('.nii.gz'));
+    if (!niftiFile) {
+      throw new Error('DICOM conversion produced no NIfTI output');
+    }
+    console.log("DICOM conversion successful, NIfTI file:", niftiFile);
+    setStatusMessage('DICOM conversion complete. Loading volume...');
+    return URL.createObjectURL(niftiFile);
+  }
+
+  async function getVolume(url, colormap, opacity) {
+    if (volumeCache.current[url]) {
+      console.log(`Volume for ${url} loaded from cache`);
+      return volumeCache.current[url];
+    }
+
+    setStatusMessage(`Loading volume: ${url}`);
+    console.log(`Loading volume from URL: ${url} with colormap: ${colormap} and opacity: ${opacity}`);
+    let loadUrl = url;
+    if (isDicomDir(url)) {
+      loadUrl = await convertDicomSeries(url);
+    }
+    console.log(`Final URL for loading volume: ${loadUrl}`);
+    let img;
+    try {
+      img = await NVImage.loadFromUrl({ url: loadUrl, colorMap: colormap, opacity: opacity });
+    } catch (err) {
+      throw new Error(`Failed to load volume from ${url}: ${err.message}`);
+    }
+    img.colormap = colormap;   // note: lowercase 'colormap', not 'colorMap'
+    img.cal_min = 0.5;         // exclude background label 0
+    img.cal_max = img.robust_max || 1.0;
+    img.opacity = opacity;
+    volumeCache.current[url] = img;
+    return img;
+  }
 
   async function fetchAvailableModels() {
     try {
       const res = await fetch(`/models`);
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
       const data = await res.json();
       setAvailableModels(data || []);
       if (data && data.length > 0) {
@@ -47,43 +187,44 @@ export default function Viewer() {
     }
   }
 
-  async function getVolume(url, colormap, opacity){
-
-    if(volumeCache[url]){
-      return volumeCache[url]
-    }
-
-    const img = await NVImage.loadFromUrl({url:url, colorMap:colormap, opacity:opacity})
-    volumeCache[url] = img
-    return img
-  }
-
   async function loadCase() {
-
+    setStatusMessage('Requesting case data...');
     const res = await fetch(`/load/${caseID}?model_name=${selectedModel}`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
     const data = await res.json();
 
-    console.log("Volume URLs:");
-    console.log(data.image, data.gt);
-
+    console.log("Volume URLs:", data.image, data.gt);
     nvRef.current.removeAllVolumes;
+
+    setStatusMessage('Loading base image and ground truth...');
+    const imageVol = await getVolume(data.image, 'gray', 1.0);
     
-    const volumes = [
-      { url: data.image, colorMap: 'gray' },
-      { url: data.gt, colorMap: 'blue', opacity: opacity }
-    ];
-    
-    return volumes
+    nvRef.current.addVolume(imageVol);
+    nvRef.current.updateGLVolume();
+    console.log("Base image loaded");
+    const gtVol = await getVolume(data.gt, 'blue', opacity);
+    nvRef.current.addVolume(gtVol);
+    nvRef.current.updateGLVolume();
+    console.log("loadCase - Base image and ground truth loaded");
+    //return [imageVol, gtVol];
   }
 
   async function segmentWithModel() {
+    setStatusMessage('Requesting segmentation from backend...');
     const res = await fetch(`/segment/${caseID}?model_name=${selectedModel}`);
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    }
     const data = await res.json();
 
-    console.log("Segmentation URL:");
-    console.log(data.output_path);
-
-    return { url: data.output_path, colorMap: 'hot', opacity: opacity };
+    console.log("Segmentation URL:", data.output_path);
+    setStatusMessage('Loading segmentation volume...');
+    const segVolume =  await getVolume(data.output_path, 'gold', opacity);
+    nvRef.current.addVolume(segVolume);
+    nvRef.current.updateGLVolume();
+    console.log("Segmentation loaded");
   }
 
   async function extractRadiomics() {
@@ -113,6 +254,9 @@ export default function Viewer() {
       const data = await res.json();
       setTaceResult(data);
     } catch (err) {
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
       console.error("Error planning TACE:", err);
       setTaceResult({ error: err.message });
     } finally {
@@ -131,6 +275,9 @@ export default function Viewer() {
       const data = await res.json();
       setSurvivalResult(data);
     } catch (err) {
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+      }
       console.error("Error running survival analysis:", err);
       setSurvivalResult({ error: err.message });
     } finally {
@@ -182,23 +329,26 @@ export default function Viewer() {
 
   async function handleSubmit() {
     try {
-    
-    const volumes = await loadCase();
-    const seg = await segmentWithModel();
-    volumes.push(seg);
-
-    await nvRef.current.loadVolumes(volumes);
-    
-    // Ensure overlays are visible with proper opacity
-    if (nvRef.current.volumes.length >= 2) {
-      nvRef.current.setOpacity(1, opacity);  // Ground truth
-    }
-    if (nvRef.current.volumes.length >= 3) {
-      nvRef.current.setOpacity(2, opacity);  // Segmentation
-    }
-
-   }catch (err) {
+      setIsLoading(true);
+      setStatusMessage('Preparing to load case...');
+      console.log(`Submitting case ID: ${caseID} with model: ${selectedModel}`);
+      await loadCase();
+      console.log("Base image and ground truth loaded into Niivue");
+      await segmentWithModel();
+      //await nvRef.current.loadVolumes(volumes);
+      console.log("All volumes loaded into Niivue");
+      if (nvRef.current.volumes.length >= 2) {
+        nvRef.current.setOpacity(1, opacity); // Ground truth
+      }
+      if (nvRef.current.volumes.length >= 3) {
+        nvRef.current.setOpacity(2, opacity); // Segmentation
+      }
+      setStatusMessage('Case loaded successfully');
+    } catch (err) {
       console.error("Error loading case:", err);
+      setStatusMessage(`Error: ${err.message}`);
+    } finally {
+      setIsLoading(false);
     }
   }
 
@@ -276,6 +426,7 @@ export default function Viewer() {
       </button>
 
       {isLoading && <p>Loading...</p>}
+      {statusMessage && <p>Status: {statusMessage}</p>}
 
       {survivalResult && (
         <div>

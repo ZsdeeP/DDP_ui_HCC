@@ -1,0 +1,309 @@
+
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: var(--font-sans, sans-serif); }
+.tab-bar { display: flex; gap: 4px; border-bottom: 0.5px solid var(--color-border-tertiary); margin-bottom: 20px; padding-bottom: 0; }
+.tab { padding: 8px 16px; font-size: 13px; color: var(--color-text-secondary); cursor: pointer; border-bottom: 2px solid transparent; margin-bottom: -1px; }
+.tab.active { color: var(--color-text-primary); border-bottom-color: var(--color-text-primary); font-weight: 500; }
+.section-title { font-size: 13px; font-weight: 500; color: var(--color-text-secondary); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.04em; }
+.metric-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-bottom: 20px; }
+.metric-card { background: var(--color-background-secondary); border-radius: var(--border-radius-md); padding: 12px 14px; }
+.metric-label { font-size: 11px; color: var(--color-text-tertiary); margin-bottom: 4px; }
+.metric-value { font-size: 22px; font-weight: 500; color: var(--color-text-primary); }
+.metric-sub { font-size: 11px; margin-top: 2px; }
+.good { color: var(--color-text-success); }
+.warn { color: var(--color-text-warning); }
+.bad { color: var(--color-text-danger); }
+.bar-row { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; font-size: 12px; }
+.bar-label { width: 60px; color: var(--color-text-secondary); text-align: right; flex-shrink: 0; }
+.bar-track { flex: 1; height: 8px; background: var(--color-background-secondary); border-radius: 4px; overflow: hidden; }
+.bar-fill { height: 100%; border-radius: 4px; transition: width 0.6s ease; }
+.bar-val { width: 40px; color: var(--color-text-primary); font-weight: 500; }
+.compare-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+.model-card { border: 0.5px solid var(--color-border-tertiary); border-radius: var(--border-radius-lg); padding: 14px; }
+.model-card.highlight { border: 2px solid var(--color-border-info); }
+.model-name { font-size: 14px; font-weight: 500; margin-bottom: 4px; }
+.model-tag { font-size: 11px; padding: 2px 8px; border-radius: 4px; display: inline-block; margin-bottom: 10px; }
+.yours { background: var(--color-background-info); color: var(--color-text-info); }
+.baseline { background: var(--color-background-secondary); color: var(--color-text-secondary); }
+.compare-stat { display: flex; justify-content: space-between; font-size: 12px; padding: 4px 0; border-bottom: 0.5px solid var(--color-border-tertiary); }
+.compare-stat:last-child { border-bottom: none; }
+.delta { font-size: 11px; margin-left: 6px; }
+.panel { display: none; }
+.panel.active { display: block; }
+.struct-tabs { display: flex; gap: 6px; margin-bottom: 14px; }
+.struct-tab { font-size: 12px; padding: 4px 12px; border-radius: 20px; border: 0.5px solid var(--color-border-secondary); cursor: pointer; color: var(--color-text-secondary); }
+.struct-tab.active { background: var(--color-text-primary); color: var(--color-background-primary); border-color: transparent; }
+.heatmap-wrap { position: relative; width: 100%; }
+.heatmap-legend { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--color-text-secondary); margin-top: 8px; }
+.legend-grad { width: 100px; height: 8px; border-radius: 4px; background: linear-gradient(to right, #3B8BD4, #E24B4A); }
+.boundary-note { font-size: 12px; color: var(--color-text-secondary); background: var(--color-background-secondary); border-radius: var(--border-radius-md); padding: 10px 12px; margin-top: 10px; line-height: 1.6; }
+canvas { display: block; }
+</style>
+
+<div style="padding: 16px 0">
+  <div class="tab-bar">
+    <div class="tab active" onclick="switchTab('metrics')">Per-structure metrics</div>
+    <div class="tab" onclick="switchTab('compare')">Baseline comparison</div>
+    <div class="tab" onclick="switchTab('boundary')">Boundary confusion</div>
+  </div>
+
+  <!-- PANEL 1: Per-structure metrics -->
+  <div class="panel active" id="panel-metrics">
+    <div class="struct-tabs">
+      <div class="struct-tab active" onclick="switchStruct('liver', this)">Liver</div>
+      <div class="struct-tab" onclick="switchStruct('tumor', this)">Tumor</div>
+      <div class="struct-tab" onclick="switchStruct('vessels', this)">Vessels</div>
+    </div>
+    <div class="metric-grid" id="kpi-grid"></div>
+    <div class="section-title">Dice per case (validation split)</div>
+    <div style="position:relative;width:100%;height:180px;margin-bottom:20px">
+      <canvas id="dice-chart" role="img" aria-label="Dice score per validation case"></canvas>
+    </div>
+    <div class="section-title" style="margin-bottom:10px">IoU &amp; Hausdorff breakdown</div>
+    <div id="bar-section"></div>
+  </div>
+
+  <!-- PANEL 2: Baseline comparison -->
+  <div class="panel" id="panel-compare">
+    <div class="compare-grid" id="compare-cards"></div>
+    <div class="section-title">Dice improvement over U-Net (per structure)</div>
+    <div style="position:relative;width:100%;height:200px;margin-bottom:16px">
+      <canvas id="compare-chart" role="img" aria-label="Model vs U-Net Dice comparison bar chart"></canvas>
+    </div>
+    <div class="section-title" style="margin-bottom:8px">Hausdorff distance (mm) — lower is better</div>
+    <div id="hd-bars"></div>
+  </div>
+
+  <!-- PANEL 3: Boundary confusion -->
+  <div class="panel" id="panel-boundary">
+    <div class="struct-tabs">
+      <div class="struct-tab active" onclick="switchBoundaryStruct('liver', this)">Liver</div>
+      <div class="struct-tab" onclick="switchBoundaryStruct('tumor', this)">Tumor</div>
+      <div class="struct-tab" onclick="switchBoundaryStruct('vessels', this)">Vessels</div>
+    </div>
+    <div style="position:relative;width:100%;height:200px;margin-bottom:8px">
+      <canvas id="boundary-chart" role="img" aria-label="Boundary error frequency by region"></canvas>
+    </div>
+    <div class="heatmap-legend">
+      <span>Low error</span><div class="legend-grad"></div><span>High error</span>
+    </div>
+    <div class="boundary-note" id="boundary-insight"></div>
+  </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script>
+const DATA = {
+  liver:   { dice: 0.934, iou: 0.877, hd: 5.2,  hd95: 3.1,  cases: [0.91,0.93,0.95,0.94,0.92,0.96,0.93,0.91,0.94,0.935,0.92,0.94] },
+  tumor:   { dice: 0.812, iou: 0.714, hd: 14.7, hd95: 8.4,  cases: [0.79,0.83,0.81,0.78,0.85,0.80,0.77,0.84,0.82,0.81,0.83,0.79] },
+  vessels: { dice: 0.761, iou: 0.652, hd: 22.3, hd95: 13.6, cases: [0.72,0.77,0.75,0.78,0.74,0.76,0.79,0.73,0.77,0.75,0.76,0.78] },
+};
+const BASELINE = {
+  liver:   { dice: 0.891, hd: 8.4  },
+  tumor:   { dice: 0.743, hd: 21.2 },
+  vessels: { dice: 0.681, hd: 31.5 },
+};
+const BOUNDARY_INSIGHTS = {
+  liver:   "Main errors at dome (superior boundary) and porta hepatis — thin slice coverage causes partial volume artefacts. Recommend attention gates in those regions.",
+  tumor:   "High confusion at tumor–parenchyma interface, especially for hypovascular lesions < 2 cm. Model over-segments at arterial phase transitions.",
+  vessels: "Portal vein bifurcation and sub-mm vessels show highest error. Topology-aware loss (clDice) improves connectivity but raises false positives near bile ducts.",
+};
+const STRUCT_COLOR = { liver: '#1D9E75', tumor: '#D85A30', vessels: '#378ADD' };
+let currentStruct = 'liver';
+let diceChart, compareChart, boundaryChart;
+
+function getColor(val, high=0.9, low=0.7) {
+  if (val >= high) return 'good';
+  if (val >= low) return 'warn';
+  return 'bad';
+}
+
+function renderKPI(s) {
+  const d = DATA[s];
+  const delta = (d.dice - BASELINE[s].dice);
+  const grid = document.getElementById('kpi-grid');
+  grid.innerHTML = `
+    <div class="metric-card"><div class="metric-label">Dice</div><div class="metric-value ${getColor(d.dice)}">${d.dice.toFixed(3)}</div><div class="metric-sub ${delta>0?'good':'bad'}">vs U-Net ${delta>0?'+':''}${delta.toFixed(3)}</div></div>
+    <div class="metric-card"><div class="metric-label">IoU (Jaccard)</div><div class="metric-value ${getColor(d.iou,0.85,0.65)}">${d.iou.toFixed(3)}</div><div class="metric-sub" style="color:var(--color-text-tertiary)">Intersection / Union</div></div>
+    <div class="metric-card"><div class="metric-label">HD95 (mm)</div><div class="metric-value ${d.hd95<10?'good':d.hd95<20?'warn':'bad'}">${d.hd95.toFixed(1)}</div><div class="metric-sub" style="color:var(--color-text-tertiary)">HD full: ${d.hd.toFixed(1)} mm</div></div>
+  `;
+}
+
+function renderBars(s) {
+  const d = DATA[s];
+  const c = STRUCT_COLOR[s];
+  const metrics = [
+    { label: 'Dice', val: d.dice, max: 1 },
+    { label: 'IoU', val: d.iou, max: 1 },
+    { label: 'HD95', val: 1 - Math.min(d.hd95/30, 1), raw: d.hd95.toFixed(1)+'mm', max: 1, invert: true },
+    { label: 'HD full', val: 1 - Math.min(d.hd/40, 1), raw: d.hd.toFixed(1)+'mm', max: 1, invert: true },
+  ];
+  document.getElementById('bar-section').innerHTML = metrics.map(m => `
+    <div class="bar-row">
+      <span class="bar-label">${m.label}</span>
+      <div class="bar-track"><div class="bar-fill" style="width:${(m.val*100).toFixed(1)}%;background:${c}"></div></div>
+      <span class="bar-val">${m.raw || m.val.toFixed(3)}</span>
+    </div>
+  `).join('');
+}
+
+function renderDiceChart(s) {
+  const d = DATA[s];
+  const c = STRUCT_COLOR[s];
+  if (diceChart) diceChart.destroy();
+  const ctx = document.getElementById('dice-chart').getContext('2d');
+  diceChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: d.cases.map((_,i) => 'C'+(i+1)),
+      datasets: [{
+        label: 'Dice',
+        data: d.cases,
+        backgroundColor: d.cases.map(v => v >= 0.9 ? c+'cc' : v >= 0.8 ? '#EF9F27cc' : '#E24B4Acc'),
+        borderRadius: 3,
+      }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false }, tooltip: { callbacks: { label: ctx => 'Dice: '+ctx.raw.toFixed(3) } } },
+      scales: {
+        y: { min: 0.6, max: 1.0, ticks: { font: { size: 11 }, callback: v => v.toFixed(2) }, grid: { color: 'rgba(128,128,128,0.1)' } },
+        x: { ticks: { font: { size: 11 } }, grid: { display: false } }
+      }
+    }
+  });
+}
+
+function renderCompareCards() {
+  const structs = ['liver','tumor','vessels'];
+  document.getElementById('compare-cards').innerHTML = `
+    <div class="model-card highlight">
+      <div class="model-name">Your model</div>
+      <div class="model-tag yours">nnU-Net + attention</div>
+      ${structs.map(s=>`
+        <div class="compare-stat">
+          <span style="color:var(--color-text-secondary);text-transform:capitalize">${s} Dice</span>
+          <span style="font-weight:500">${DATA[s].dice.toFixed(3)} <span class="delta good">▲ ${(DATA[s].dice-BASELINE[s].dice).toFixed(3)}</span></span>
+        </div>`).join('')}
+    </div>
+    <div class="model-card">
+      <div class="model-name">U-Net baseline</div>
+      <div class="model-tag baseline">Standard 3D U-Net</div>
+      ${structs.map(s=>`
+        <div class="compare-stat">
+          <span style="color:var(--color-text-secondary);text-transform:capitalize">${s} Dice</span>
+          <span style="font-weight:500">${BASELINE[s].dice.toFixed(3)}</span>
+        </div>`).join('')}
+    </div>
+  `;
+}
+
+function renderCompareChart() {
+  if (compareChart) compareChart.destroy();
+  const ctx = document.getElementById('compare-chart').getContext('2d');
+  compareChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ['Liver','Tumor','Vessels'],
+      datasets: [
+        { label: 'Your model', data: ['liver','tumor','vessels'].map(s=>DATA[s].dice), backgroundColor: '#1D9E75cc', borderRadius: 4 },
+        { label: 'U-Net', data: ['liver','tumor','vessels'].map(s=>BASELINE[s].dice), backgroundColor: '#73726c55', borderRadius: 4 },
+      ]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend: { display: false } },
+      scales: {
+        y: { min: 0.6, max: 1.0, ticks: { font: { size: 11 }, callback: v => v.toFixed(2) }, grid: { color: 'rgba(128,128,128,0.1)' } },
+        x: { ticks: { font: { size: 12 } }, grid: { display: false } }
+      }
+    }
+  });
+  const legend = document.createElement('div');
+  legend.style.cssText = 'display:flex;gap:16px;font-size:12px;color:var(--color-text-secondary);margin-bottom:8px';
+  legend.innerHTML = `<span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#1D9E75;display:inline-block"></span>Your model</span><span style="display:flex;align-items:center;gap:4px"><span style="width:10px;height:10px;border-radius:2px;background:#73726c88;display:inline-block"></span>U-Net baseline</span>`;
+  document.getElementById('compare-chart').parentElement.parentElement.insertBefore(legend, document.getElementById('compare-chart').parentElement);
+}
+
+function renderHDBars() {
+  const structs = ['liver','tumor','vessels'];
+  document.getElementById('hd-bars').innerHTML = structs.map(s => {
+    const yours = DATA[s].hd, base = BASELINE[s].hd, maxV = Math.max(yours, base) * 1.1;
+    return `
+      <div style="margin-bottom:12px">
+        <div style="font-size:12px;color:var(--color-text-secondary);margin-bottom:4px;text-transform:capitalize">${s}</div>
+        <div class="bar-row">
+          <span class="bar-label" style="width:80px">Your model</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${(yours/maxV*100).toFixed(1)}%;background:${STRUCT_COLOR[s]}"></div></div>
+          <span class="bar-val">${yours.toFixed(1)}</span>
+        </div>
+        <div class="bar-row">
+          <span class="bar-label" style="width:80px">U-Net</span>
+          <div class="bar-track"><div class="bar-fill" style="width:${(base/maxV*100).toFixed(1)}%;background:#73726c88"></div></div>
+          <span class="bar-val">${base.toFixed(1)}</span>
+        </div>
+      </div>`;
+  }).join('');
+}
+
+const BOUNDARY_DATA = {
+  liver: [12,8,18,6,22,9,15,11,20,7,14,10,17,8,25,6,19,13,11,16],
+  tumor: [28,35,18,42,31,38,25,44,32,19,37,29,41,22,36,30,43,27,33,40],
+  vessels: [15,22,31,19,38,26,43,17,35,28,21,41,24,32,39,18,44,27,36,23],
+};
+
+function renderBoundaryChart(s) {
+  if (boundaryChart) boundaryChart.destroy();
+  const vals = BOUNDARY_DATA[s];
+  const mx = Math.max(...vals);
+  const colors = vals.map(v => {
+    const t = v/mx;
+    const r = Math.round(59 + t*(226-59));
+    const g = Math.round(139 + t*(75-139));
+    const b = Math.round(212 + t*(74-212));
+    return `rgba(${r},${g},${b},0.85)`;
+  });
+  const ctx = document.getElementById('boundary-chart').getContext('2d');
+  boundaryChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: vals.map((_,i)=>'R'+(i+1)),
+      datasets: [{ label: 'Error freq', data: vals, backgroundColor: colors, borderRadius: 2 }]
+    },
+    options: {
+      responsive: true, maintainAspectRatio: false,
+      plugins: { legend:{display:false}, tooltip:{callbacks:{label:c=>'Error freq: '+c.raw}} },
+      scales: {
+        y: { ticks:{font:{size:11}}, grid:{color:'rgba(128,128,128,0.1)'} },
+        x: { ticks:{font:{size:10},autoSkip:false,maxRotation:0}, grid:{display:false} }
+      }
+    }
+  });
+  document.getElementById('boundary-insight').textContent = BOUNDARY_INSIGHTS[s];
+}
+
+function switchStruct(s, el) {
+  currentStruct = s;
+  document.querySelectorAll('#panel-metrics .struct-tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  renderKPI(s); renderBars(s); renderDiceChart(s);
+}
+
+function switchBoundaryStruct(s, el) {
+  document.querySelectorAll('#panel-boundary .struct-tab').forEach(t=>t.classList.remove('active'));
+  el.classList.add('active');
+  renderBoundaryChart(s);
+}
+
+function switchTab(name) {
+  document.querySelectorAll('.panel').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('.tab').forEach(t=>t.classList.remove('active'));
+  document.getElementById('panel-'+name).classList.add('active');
+  event.target.classList.add('active');
+  if (name==='compare' && !compareChart) { renderCompareCards(); renderCompareChart(); renderHDBars(); }
+  if (name==='boundary') renderBoundaryChart(currentStruct);
+}
+
+renderKPI('liver'); renderBars('liver'); renderDiceChart('liver');
+</script>

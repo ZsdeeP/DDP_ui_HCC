@@ -7,6 +7,7 @@ export default defineConfig({
     proxy: {
       "/load": "http://localhost:8000",
       "/data": "http://localhost:8000",
+      "/dicom_files": "http://localhost:8000",
       "/segment": "http://localhost:8000",
       "/models": "http://localhost:8000",
       "/extract_radiomics": "http://localhost:8000",

@@ -15,6 +15,7 @@ import argparse
 from pathlib import Path
 
 import pydicom
+import SimpleITK as sitk
 import monai
 from monai.data.dataset import Dataset
 from monai.data.dataloader import DataLoader
@@ -39,6 +40,10 @@ class_tissue_dict = {
     3: "bloodvessels",
     4: "abdominalaorta"
 }
+
+current_dir = Path(__file__).resolve().parent
+parent_dir = current_dir.parent
+
 
 from monai.transforms.io.array import LoadImage
 
@@ -211,6 +216,73 @@ def collate_with_metadata(batch):
     labels = default_collate([item[0]['label'] for item in flat_batch])
     metadata = [item[0]['metadata'] for item in flat_batch] # Keep metadata as a list
     return {'image': images, 'label': labels, 'metadata': metadata}
+
+def load_masks(tissue_class: int, pred_mask: str, gt_mask: str, return_affine: bool=False):
+    loaded_pred_mask = nib.load(pred_mask).get_fdata() #type: ignore
+    affine = loaded_pred_mask.affine
+    loaded_pred_mask = (loaded_pred_mask == tissue_class)
+    
+    gt_mask = Path(gt_mask)
+    if gt_mask.is_dir():
+        loaded_gt_mask = read_segmentation_dicom(gt_mask, class_number=tissue_class)
+    elif str(gt_mask).endswith('.nii.gz') or str(gt_mask).endswith('.nii'):
+        loaded_gt_mask = nib.load(gt_mask).get_fdata() #type: ignore
+    else:
+        raise ValueError(f"Unsupported file format for case {tissue_class}")
+    loaded_gt_mask = (loaded_gt_mask == tissue_class)
+    if return_affine:
+        return loaded_pred_mask, loaded_gt_mask, affine
+    else:
+        return loaded_pred_mask, loaded_gt_mask
+
+
+def compute_dice(tissue_class:int, pred_mask:str, gt_mask:str):
+
+    loaded_pred_mask, loaded_gt_mask = load_masks(tissue_class, pred_mask, gt_mask)
+    
+    mask_threshold = 0.5
+    eps = 1e-6
+    loaded_pred_mask = (loaded_pred_mask > mask_threshold).astype(np.float32)
+
+    volume_sum = loaded_gt_mask.sum() + loaded_pred_mask.sum()
+    if volume_sum == 0:
+        return np.nan
+    volume_intersect = (loaded_gt_mask & loaded_pred_mask).sum()
+    return 2 * volume_intersect / (volume_sum + eps)
+
+def compute_iou(tissue_class:int, pred_mask:str, gt_mask:str):
+    loaded_pred_mask, loaded_gt_mask = load_masks(tissue_class, pred_mask, gt_mask)
+
+    inter = loaded_pred_mask * loaded_gt_mask
+    union = loaded_pred_mask + loaded_gt_mask - inter
+    eps = 1e-6
+    return (inter.sum())/(union.sum() + eps)
+
+def compute_hausdorff(tissue_class: int, pred_mask:str, gt_mask:str, percentile:int=95):
+    loaded_pred_mask, loaded_gt_mask = load_masks(tissue_class, pred_mask, gt_mask)
+    loaded_pred_mask = sitk.GetImageFromArray(loaded_pred_mask)
+    loaded_gt_mask = sitk.GetImageFromArray(loaded_gt_mask)
+
+    hausdorff_filter = sitk.HausdorffDistanceImageFilter()
+    hausdorff_filter.Execute(loaded_pred_mask, loaded_gt_mask)
+
+    # 4. Get the results
+    hd = hausdorff_filter.GetHausdorffDistance()
+    avg_hd = hausdorff_filter.GetAverageHausdorffDistance()
+    return avg_hd
+
+
+def compute_boundary_confusion(tissue_class: int, pred_mask:str, gt_mask:str, output_nifti_path:Path):
+    loaded_pred_mask, loaded_gt_mask, affine = load_masks(tissue_class, pred_mask, gt_mask, return_affine=True)
+
+    tp = (loaded_gt_mask & loaded_pred_mask).astype(np.uint8)
+    fp = (~loaded_gt_mask & loaded_pred_mask).astype(np.uint8) * 2
+    fn = (loaded_gt_mask & ~loaded_pred_mask).astype(np.uint8) * 3
+
+    out = nib.Nifti1Image(tp + fp + fn, affine)
+    
+    nib.save(out, output_nifti_path)
+    return {"output_path" : output_nifti_path}
 
 #mask other classes
 
