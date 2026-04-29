@@ -20,6 +20,14 @@ export default function Viewer({ caseID, setcaseID, structure, onSliceChange, nv
   const [isLoading, setIsLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState("");
 
+  const QA_COLORMAP = {
+  R: [0,  30,  220, 30 ],   // 0=bg, 1=TP (green), 2=FP (gold), 3=FN (blue)
+  G: [0,  220, 160, 100],
+  B: [0,  20, 0,   220],
+  A: [0,  255, 255, 255],
+  I: [0,  85,  170, 255],   // evenly spaced breakpoints for 4 labels
+  };
+
   loadErmapRef.current = loadErmap;
 
   useEffect(() => {
@@ -108,6 +116,7 @@ export default function Viewer({ caseID, setcaseID, structure, onSliceChange, nv
 
     console.log("File objects for conversion:", fileObjects);
     const convertedFiles = await dcm2niixRef.current.input(fileObjects).run();
+    console.log("converted files")
     const niftiFile = convertedFiles.find((file) => file.name.endsWith('.nii') || file.name.endsWith('.nii.gz'));
     if (!niftiFile) {
       throw new Error('DICOM conversion produced no NIfTI output');
@@ -186,6 +195,8 @@ export default function Viewer({ caseID, setcaseID, structure, onSliceChange, nv
 
   async function loadErmap() {
     setStatusMessage('Requesting case data...');
+    nvRef.current.addColormap('seg_qa', QA_COLORMAP);
+
     const res = await fetch(`/load/${caseID}?model_name=${selectedModel}`);
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
 
@@ -202,9 +213,12 @@ export default function Viewer({ caseID, setcaseID, structure, onSliceChange, nv
     nvRef.current.addVolume(imageVol);
     nvRef.current.updateGLVolume();
 
-    const erVol = await getVolume(erdata.boundary_error_map, 'hot', opacity);
+    const erVol = await getVolume(erdata.boundary_error_map, 'seg_qa', opacity);
     nvRef.current.addVolume(erVol);
+    nvRef.current.volumes[nvRef.current.volumes.length - 1].cal_min = 0.5;
+    nvRef.current.volumes[nvRef.current.volumes.length - 1].cal_max = 3.5;
     nvRef.current.updateGLVolume();
+    setStatusMessage('Error maps loaded')
 
     onMetricsLoaded(erdata);  // ← lift metrics up, erdata has everything
   }

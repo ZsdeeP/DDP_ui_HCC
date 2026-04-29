@@ -5,6 +5,11 @@ from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 import nibabel as nib
 import numpy as np
+import subprocess
+import glob
+import os
+import shutil 
+import tempfile
 
 from pathlib import Path
 from urllib.parse import unquote
@@ -30,7 +35,7 @@ from monai.transforms.croppad.dictionary import (
 from monai.transforms.utility.dictionary import EnsureTyped
 from monai.transforms.post.dictionary import Invertd
 
-from infer_model import load_metadata_indices, load_trained_model, run_inference, save_val_results, collate_with_metadata, compute_dice, compute_iou, compute_hausdorff, compute_boundary_confusion
+from infer_model import load_metadata_indices, load_trained_model, run_inference, save_val_results, collate_with_metadata, compute_dice, compute_iou, compute_hausdorff, compute_boundary_confusion, per_slice_dice, per_slice_iou
 from radiomics_extractor import RadiomicsExtractor
 from tace_planner import TACEPlanner
 from survival_analysis import run_survival_analysis
@@ -63,7 +68,6 @@ templates_path = static_path / "templates"
 data_path = current_dir / "data"
 
 app = FastAPI()
-router = app.router
 app.mount("/static", StaticFiles(directory=static_path), name="static")
 app.mount("/data", StaticFiles(directory=data_path), name="data")
 
@@ -106,8 +110,7 @@ def list_dicom_files(url: str):
 # Also, prioritize showing the segmentation in the original DICOM format if it exists, and only convert to NIfTI if necessary for visualization or radiomics extraction. This way we can preserve the original data format and ensure the most accurate representation of the segmentations while still providing flexibility for analysis and visualization.
 
 
-def reorient_segmentation(case_id: str, model_name : str, cat=2):
-    
+def reorient_segmentation(case_id: str, model_name : str, cat:int):
     cat_dict = {0: "base_images", 1: "ground_truths", 2: f"segmentations/{model_name}"} 
     suffix_dict = {0: "", 1: "_gt", 2: "_pred"}
     # Load the volume to get its affine matrix
@@ -142,56 +145,57 @@ def get_image_path(case_id: str, suffix: str = "", category: int = 0, model_name
         else:
             pred_dcm_path = data_path / "segmentations" / model_name / f"{case_id}_pred"
             #look for dcm file
-            pred_dcm_path = [file_path for file_path in pred_dcm_path.glob("*") if file_path.is_file()][0]
-            if pred_dcm_path.exists():
-                '''_, metadata = read_dicom_series(str(base_dcm_path))
-                liver = read_segmentation_dicom(str(pred_dcm_path), class_number=1)
-                tumor = read_segmentation_dicom(str(pred_dcm_path), class_number=2)
-                bloodvessels = read_segmentation_dicom(str(pred_dcm_path), class_number=3)
-                abdominalaorta = read_segmentation_dicom(str(pred_dcm_path), class_number=4)
-                #combine the four classes into one segmentation volume with different class numbers for each tissue type, and save as nifti for visualization and radiomics extraction
-                seg_volume = np.zeros_like(liver, dtype=np.uint8)
-                seg_volume[liver > 0] = 1
-                seg_volume[tumor > 0] = 2
-                seg_volume[bloodvessels > 0] = 3
-                seg_volume[abdominalaorta > 0] = 4'''
+            pred_dcm_file = [file_path for file_path in pred_dcm_path.glob("*") if file_path.is_file()][0]
+            if pred_dcm_file.exists():
                 pred_path = reorient_segmentation(case_id, model_name, cat=2)
-
                 return f"/data/segmentations/{model_name}/{case_id}_pred.nii.gz"
             else:
                 raise FileNotFoundError(f"No segmentation file found for {case_id} with model {model_name}")
 
-    # Prioritize DICOM directories for images and ground truths
-    dcm_path = data_path / cat_dict[category] / f"{case_id}{suffix}"
-    if dcm_path.exists() and dcm_path.is_dir():
-        if category == 1:
-            _, metadata = read_dicom_series(str(base_dcm_path))
-            dcm_path = [file_path for file_path in dcm_path.glob("*") if file_path.is_file()][0]
+    else:
+        # Prioritize DICOM directories for images and ground truths
+        dcm_path = data_path / cat_dict[category] / f"{case_id}{suffix}"
+        if dcm_path.exists() and dcm_path.is_dir():
+            if category == 1:
+                gt_path = reorient_segmentation(case_id, model_name, cat=1)
+                return f"/data/ground_truths/{case_id}_gt.nii.gz"
+            else:
+                dicom_files = glob.glob(os.path.join(str(dcm_path), "1-*.dcm"))
+                if not dicom_files:
+                    dicom_files = glob.glob(os.path.join(str(dcm_path), "2-*.dcm"))
+                if not dicom_files:
+                    dicom_files = glob.glob(os.path.join(str(dcm_path), "*.dcm"))
+                if not dicom_files:
+                    raise ValueError(f"No DICOM files found in {str(dcm_path)}")
+                output_dir = data_path / "segmentations" / model_name
+                with tempfile.TemporaryDirectory() as tmpdir:
+                    for f in dicom_files:
+                        shutil.copy(f, tmpdir)
+                    result = subprocess.run(
+                        ["dcm2niix", "-z", "y", "-f", "%i_%p", "-o", str(output_dir), str(tmpdir)],
+                        capture_output=True,
+                        text=True
+                    )
 
-            liver = read_segmentation_dicom(str(dcm_path), class_number=1)
-            tumor = read_segmentation_dicom(str(dcm_path), class_number=2)
-            bloodvessels = read_segmentation_dicom(str(dcm_path), class_number=3)
-            abdominalaorta = read_segmentation_dicom(str(dcm_path), class_number=4)
-            #combine the four classes into one segmentation volume with different class numbers for each tissue type, and save as nifti for visualization and radiomics extraction
-            seg_volume = np.zeros_like(liver, dtype=np.uint8)
-            seg_volume[liver > 0] = 1
-            seg_volume[tumor > 0] = 2
-            seg_volume[bloodvessels > 0] = 3
-            seg_volume[abdominalaorta > 0] = 4
-            gt_path = reorient_segmentation(case_id, model_name, cat=1)
-            return f"/data/ground_truths/{case_id}_gt.nii.gz"
+                if result.returncode != 0:
+                    raise RuntimeError(f"dcm2niix failed: {result.stderr}")
 
-        return f"/data/{cat_dict[category]}/{case_id}{suffix}/"
-    
-    nii_gz_path = data_path / cat_dict[category] / f"{case_id}{suffix}.nii.gz"
-    if nii_gz_path.exists():
-        return f"/data/{cat_dict[category]}/{case_id}{suffix}.nii.gz"
-    
-    nii_path = data_path / cat_dict[category] / f"{case_id}{suffix}.nii"
-    if nii_path.exists():
-        return f"/data/{cat_dict[category]}/{case_id}{suffix}.nii"
-    
-    raise FileNotFoundError(f"No image file found for {case_id}{suffix}")
+                # Find the output nii.gz
+                nifti_files = list(output_dir.glob("*.nii.gz"))
+                if not nifti_files:
+                    raise ValueError("dcm2niix produced no NIfTI output")
+
+                return f"/data/{cat_dict[category]}/{case_id}{suffix}/"
+        
+        nii_gz_path = data_path / cat_dict[category] / f"{case_id}{suffix}.nii.gz"
+        if nii_gz_path.exists():
+            return f"/data/{cat_dict[category]}/{case_id}{suffix}.nii.gz"
+        
+        nii_path = data_path / cat_dict[category] / f"{case_id}{suffix}.nii"
+        if nii_path.exists():
+            return f"/data/{cat_dict[category]}/{case_id}{suffix}.nii"
+        
+        raise FileNotFoundError(f"No image file found for {case_id}{suffix}")
 
 
 def build_analysis_file_list(output_dir: Path):
@@ -262,10 +266,12 @@ def segment_images(case_id: str, model_name: str, class_number: int, patch_size:
 
 @app.get("/segment/{case_id}")
 def segment_case(case_id: str, model_name: str):
+    print(1)
     seg_dir = data_path / "segmentations" / model_name
     seg_nifti_gz = seg_dir / f"{case_id}_pred.nii.gz"
     seg_nifti = seg_dir / f"{case_id}_pred.nii"
     seg_dcm_dir = seg_dir / f"{case_id}_pred"
+    print(seg_dcm_dir)
 
     if seg_nifti_gz.exists():
         return {"output_path": f"/data/segmentations/{model_name}/{case_id}_pred.nii.gz"}
@@ -273,18 +279,19 @@ def segment_case(case_id: str, model_name: str):
         return {"output_path": f"/data/segmentations/{model_name}/{case_id}_pred.nii"}
     elif seg_dcm_dir.exists():
         return {"output_path": get_image_path(case_id, "_pred", category=2, model_name=model_name)}
-
-    Path.mkdir(seg_dir, parents=True, exist_ok=True)
-    result_list = []
-    affine0 = np.eye(4)
-    for class_nums in range(1, 5): #segment each class separately and save results in same file with different class numbers,
-        # then extract the class of interest. Only meant for the HCC-TACE dataset
-        outputs, all_metadata, dice = segment_images(case_id, model_name, class_nums, PATCH_SIZE)
-        result, affine0 = save_val_results(outputs, class_nums, all_metadata)
-        result_list.append(result*class_nums)
-    final_result = np.stack(result_list, axis=0).max(axis=0)
-    final_filename = reorient_segmentation(case_id, model_name)
-    return {"output_path": f"/data/segmentations/{model_name}/{case_id}_pred.nii.gz"}
+    
+    else:
+        Path.mkdir(seg_dir, parents=True, exist_ok=True)
+        result_list = []
+        affine0 = np.eye(4)
+        for class_nums in range(1, 5): #segment each class separately and save results in same file with different class numbers,
+            # then extract the class of interest. Only meant for the HCC-TACE dataset
+            outputs, all_metadata, dice = segment_images(case_id, model_name, class_nums, PATCH_SIZE)
+            result, affine0 = save_val_results(outputs, all_metadata)
+            result_list.append(result*class_nums)
+        final_result = np.stack(result_list, axis=0).max(axis=0)
+        final_filename = reorient_segmentation(case_id, model_name, 2)
+        return {"output_path": f"/data/segmentations/{model_name}/{case_id}_pred.nii.gz"}
 
 
 
@@ -305,20 +312,28 @@ import io
 
 
 
-@router.get("/evaluate/{case_id}")
-async def evaluate_case(case_id: str, model_name: str, tissue_class: int = 1):
+@app.get("/evaluate_case/{case_id}/{structure}")
+async def evaluate_case(case_id: str, model_name: str, structure: str):
+    tissue_class_dict = {"liver" : 1, "tumor" : 2, "bloodvessels" : 3, "abdominalaorta" : 4}
+    tissue_class = tissue_class_dict[structure]
     pred_mask = get_image_path(case_id, "_pred", 2, model_name=model_name)
-    em_mask_dir = data_path / "error_masks" / f"{model_name}" 
+    em_mask_dir = data_path / "error_masks" / f"{model_name}" / f"{structure}"
     em_mask_dir.mkdir(parents=True, exist_ok=True)
     em_mask = em_mask_dir / f"{case_id}_em.nii.gz"
-    gt_mask   = get_image_path(case_id, "_gt", 1)
+    gt_mask   = get_image_path(case_id, "_gt", 1, model_name=model_name)
 
+
+    pred_mask = (current_dir / pred_mask[1:]).resolve()
+    gt_mask = (current_dir / gt_mask[1:]).resolve()
+    #em_mask = (current_dir / em_mask).resolve()
 
     return {
         "dice":   compute_dice(tissue_class, pred_mask, gt_mask),
         "iou":    compute_iou(tissue_class, pred_mask, gt_mask),
         "hd":     compute_hausdorff(tissue_class, pred_mask, gt_mask, percentile=100),
         #"hd95":   compute_hausdorff(tissue_class, pred_mask, gt_mask, percentile=95),
+        "per_slice_iou" : per_slice_iou(tissue_class, pred_mask, gt_mask), #this is a list idk how js handles it
+        "per_slice_dice" : per_slice_dice(tissue_class, pred_mask, gt_mask), # same here
         "boundary_error_map": compute_boundary_confusion(tissue_class, pred_mask, gt_mask, em_mask),
     }
 

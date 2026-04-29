@@ -217,26 +217,32 @@ def collate_with_metadata(batch):
     metadata = [item[0]['metadata'] for item in flat_batch] # Keep metadata as a list
     return {'image': images, 'label': labels, 'metadata': metadata}
 
-def load_masks(tissue_class: int, pred_mask: str, gt_mask: str, return_affine: bool=False):
-    loaded_pred_mask = nib.load(pred_mask).get_fdata() #type: ignore
-    affine = loaded_pred_mask.affine
-    loaded_pred_mask = (loaded_pred_mask == tissue_class)
+def load_masks(tissue_class: int, pred_mask: Path, gt_mask: Path, return_affine: bool=False):
+    pred_mask_path = Path(pred_mask).resolve()
+    pred_mask_path2 = (current_dir / pred_mask).resolve()
+
+    pred_img = nib.load(pred_mask_path2)          # load the image object first
+    affine = pred_img.affine #type: ignore      
+    loaded_pred_mask = pred_img.get_fdata()    # type: ignore   
     
-    gt_mask = Path(gt_mask)
-    if gt_mask.is_dir():
-        loaded_gt_mask = read_segmentation_dicom(gt_mask, class_number=tissue_class)
+    loaded_pred_mask = (loaded_pred_mask == tissue_class).astype(np.float32)
+    
+    gt_mask_path = Path(gt_mask).resolve()
+    gt_mask_path2 = (current_dir / gt_mask).resolve()
+    if gt_mask_path2.is_dir():
+        loaded_gt_mask = read_segmentation_dicom(gt_mask_path2, class_number=tissue_class)
     elif str(gt_mask).endswith('.nii.gz') or str(gt_mask).endswith('.nii'):
-        loaded_gt_mask = nib.load(gt_mask).get_fdata() #type: ignore
+        loaded_gt_mask = nib.load(gt_mask_path2).get_fdata() #type: ignore
     else:
         raise ValueError(f"Unsupported file format for case {tissue_class}")
-    loaded_gt_mask = (loaded_gt_mask == tissue_class)
+    loaded_gt_mask = (loaded_gt_mask == tissue_class).astype(np.float32)
     if return_affine:
         return loaded_pred_mask, loaded_gt_mask, affine
     else:
         return loaded_pred_mask, loaded_gt_mask
 
 
-def compute_dice(tissue_class:int, pred_mask:str, gt_mask:str):
+def compute_dice(tissue_class:int, pred_mask:Path, gt_mask:Path):
 
     loaded_pred_mask, loaded_gt_mask = load_masks(tissue_class, pred_mask, gt_mask)
     
@@ -247,18 +253,18 @@ def compute_dice(tissue_class:int, pred_mask:str, gt_mask:str):
     volume_sum = loaded_gt_mask.sum() + loaded_pred_mask.sum()
     if volume_sum == 0:
         return np.nan
-    volume_intersect = (loaded_gt_mask & loaded_pred_mask).sum()
-    return 2 * volume_intersect / (volume_sum + eps)
+    volume_intersect = (loaded_gt_mask * loaded_pred_mask).sum()
+    return (2 * volume_intersect / (volume_sum + eps)).item()
 
-def compute_iou(tissue_class:int, pred_mask:str, gt_mask:str):
+def compute_iou(tissue_class:int, pred_mask:Path, gt_mask:Path):
     loaded_pred_mask, loaded_gt_mask = load_masks(tissue_class, pred_mask, gt_mask)
 
     inter = loaded_pred_mask * loaded_gt_mask
     union = loaded_pred_mask + loaded_gt_mask - inter
     eps = 1e-6
-    return (inter.sum())/(union.sum() + eps)
+    return ((inter.sum())/(union.sum() + eps)).item()
 
-def compute_hausdorff(tissue_class: int, pred_mask:str, gt_mask:str, percentile:int=95):
+def compute_hausdorff(tissue_class: int, pred_mask:Path, gt_mask:Path, percentile:int=95):
     loaded_pred_mask, loaded_gt_mask = load_masks(tissue_class, pred_mask, gt_mask)
     loaded_pred_mask = sitk.GetImageFromArray(loaded_pred_mask)
     loaded_gt_mask = sitk.GetImageFromArray(loaded_gt_mask)
@@ -272,17 +278,49 @@ def compute_hausdorff(tissue_class: int, pred_mask:str, gt_mask:str, percentile:
     return avg_hd
 
 
-def compute_boundary_confusion(tissue_class: int, pred_mask:str, gt_mask:str, output_nifti_path:Path):
+def compute_boundary_confusion(tissue_class: int, pred_mask:Path, gt_mask:Path, output_nifti_path:Path):
     loaded_pred_mask, loaded_gt_mask, affine = load_masks(tissue_class, pred_mask, gt_mask, return_affine=True)
 
-    tp = (loaded_gt_mask & loaded_pred_mask).astype(np.uint8)
-    fp = (~loaded_gt_mask & loaded_pred_mask).astype(np.uint8) * 2
-    fn = (loaded_gt_mask & ~loaded_pred_mask).astype(np.uint8) * 3
+    loaded_pred_mask = loaded_pred_mask.astype(np.bool)
+    loaded_gt_mask = loaded_gt_mask.astype(np.bool)
+    tp = (loaded_gt_mask * loaded_pred_mask).astype(np.uint8)
+    fp = (~loaded_gt_mask * loaded_pred_mask).astype(np.uint8) * 2
+    fn = (loaded_gt_mask * ~loaded_pred_mask).astype(np.uint8) * 3
 
-    out = nib.Nifti1Image(tp + fp + fn, affine)
-    
+    out = nib.Nifti1Image(tp + fp + fn, affine)    
     nib.save(out, output_nifti_path)
-    return {"output_path" : output_nifti_path}
+    return str(output_nifti_path.relative_to(current_dir))
+
+
+def per_slice_dice(tissue_class: int, pred_mask:Path, gt_mask:Path):
+    loaded_pred_mask, loaded_gt_mask = load_masks(tissue_class, pred_mask, gt_mask)
+    num_slices = loaded_pred_mask.shape[0]
+    psd = []
+    for i in range(num_slices):
+        mask_threshold = 0.5
+        eps = 1e-6
+        loaded_pred_mask[i] = (loaded_pred_mask[i] > mask_threshold).astype(np.float32)
+        volume_sum = loaded_gt_mask[i].sum() + loaded_pred_mask[i].sum()
+        if volume_sum == 0:
+            psd.append(0)
+        else:
+            volume_intersect = (loaded_gt_mask[i] * loaded_pred_mask[i]).sum()
+            psd.append((2 * volume_intersect / (volume_sum + eps)).item())
+    return psd
+
+def per_slice_iou(tissue_class: int, pred_mask:Path, gt_mask:Path):
+    loaded_pred_mask, loaded_gt_mask = load_masks(tissue_class, pred_mask, gt_mask)
+    num_slices = loaded_pred_mask.shape[0]
+    psi = []
+    for i in range(num_slices):
+        mask_threshold = 0.5
+        eps = 1e-6
+        loaded_pred_mask[i] = (loaded_pred_mask[i] > mask_threshold).astype(np.float32)
+        inter = loaded_pred_mask[i] * loaded_gt_mask[i]
+        union = loaded_pred_mask[i] + loaded_gt_mask[i] - inter
+        eps = 1e-6
+        psi.append(((inter.sum())/(union.sum() + eps)).item())
+    return psi
 
 #mask other classes
 

@@ -15,10 +15,15 @@ export default function EvaluationDashboard({ caseID, structure, setStructure, s
   const diceChartInstance           = useRef(null);
   const iouChartRef                 = useRef(null);
   const iouChartInstance            = useRef(null);
+  const [ermapStatus, setErmapStatus] = useState('idle'); // 'idle' | 'loading' | 'done' | 'error'
 
   // Fetch metrics whenever caseID or structure changes
-
   // Build per-slice Dice chart
+
+  useEffect(() => {
+      setErmapStatus('idle');
+    }, [structure]);
+
   useEffect(() => {
     if (!metrics?.per_slice_dice || !diceChartRef.current || activeDashTab !== 'metrics') return;
     try{
@@ -61,7 +66,7 @@ export default function EvaluationDashboard({ caseID, structure, setStructure, s
         } 
     }});
     } catch (e) {
-    console.error('Chart error:', e);  // this will tell us exactly what's failing
+    console.error('Chart error',  e);  // this will tell us exactly what's failing
   }
 }, [metrics, activeDashTab, sliceIdx]);
 
@@ -108,6 +113,15 @@ export default function EvaluationDashboard({ caseID, structure, setStructure, s
     });
   }, [metrics, activeDashTab]);
 
+    async function handleLoadErmap() {
+    setErmapStatus('loading');
+    try {
+      await loadErmap.current?.();
+      setErmapStatus('done');
+    } catch (e) {
+      setErmapStatus('error', e);
+    }
+  }
   
 
   if (!caseID) return (
@@ -209,20 +223,36 @@ export default function EvaluationDashboard({ caseID, structure, setStructure, s
           <span style={{ color: '#378ADD' }}>■</span> False Negative
         </p>
         <button
-          onClick={() => {loadErmap.current?.()
-          setactiveDashTab('viewer');  
-          }}
-          disabled={!caseID || !loadErmap.current}
-          style={{
-            padding: '8px 20px', borderRadius: 6, cursor: 'pointer', fontSize: 13,
-            background: '#1D9E75', color: '#fff', border: 'none', fontWeight: 500,
-            opacity: (!caseID || !loadErmap.current) ? 0.5 : 1,
-          }}
-        >
+      onClick={handleLoadErmap}
+      disabled={!caseID || ermapStatus === 'loading'}
+      style={{
+        padding: '8px 20px', borderRadius: 6, cursor: 'pointer', fontSize: 13,
+        background: ermapStatus === 'done' ? '#378ADD' : '#1D9E75',
+        color: '#fff', border: 'none', fontWeight: 500,
+        opacity: (!caseID || ermapStatus === 'loading') ? 0.5 : 1,
+      }}
+    >
+      {ermapStatus === 'loading' ? 'Loading…' : ermapStatus === 'done' ? 'Reload in viewer' : 'Load in viewer'}
+    </button>
 
-          Load in viewer
-        </button>
-      </div>
+    {/* Status messages */}
+    {ermapStatus === 'loading' && (
+      <p style={{ fontSize: 12, color: '#888', marginTop: 10 }}>
+        Fetching error map, please wait…
+      </p>
+    )}
+    {ermapStatus === 'done' && (
+      <p style={{ fontSize: 12, color: '#1D9E75', marginTop: 10 }}>
+        ✓ Loaded. Switch to the <strong>Viewer</strong> tab to inspect the overlay.
+      </p>
+    )}
+    {ermapStatus === 'error' && (
+      <p style={{ fontSize: 12, color: '#E24B4A', marginTop: 10 }}>
+        ✗ Failed to load error map. Check the console for details.
+      </p>
+    )}
+
+    </div>
     )}
 
   </div>
