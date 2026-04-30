@@ -87,7 +87,7 @@ class RadiomicsExtractor:
                 'affine': nib_img.affine,
                 'spacing': nib_img.header.get_zooms()[:3]  # Get voxel spacing
             }
-            return volume, metadata
+            return volume.transpose(2, 0, 1), metadata
         # Check if it's a DICOM directory
         elif volume_path.is_dir():
             # Load DICOM series
@@ -114,6 +114,7 @@ class RadiomicsExtractor:
             # Load NIfTI file
             nib_img = nib.load(seg_path)
             segmentation = nib_img.get_fdata() #type: ignore
+            segmentation = segmentation.transpose(2, 0, 1)
             
             # If requesting a specific class, extract it
             if class_number is not None:
